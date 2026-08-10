@@ -706,3 +706,58 @@ This is ADR-0008's technique applied to money rather than to markets, for the sa
 - **T35** may write `processed_at` and `error` on `stripe_webhook_events` exactly as designed — T05 added no trigger there, and the test suite asserts the table has zero triggers so T06's restricted-UPDATE trigger arrives as the only one.
 - **T10** inherits the retention consequence unchanged from ADR-0010, plus one clarification: `app_events` does **not** block account deletion and de-identifies itself, so the pseudonymisation mechanism T10 designs has to cover `credit_ledger` and `credit_purchases` only.
 - **`ARCHITECTURE.md` §2.3** should be read with decisions 5–8 alongside it; the column lists there are otherwise silent on all four points.
+
+---
+
+## ADR-0012 — Temporal exclusion constraints use `daterange`, and the two tables reject the same mistake with different SQLSTATEs
+
+**Status:** Accepted · T05A · 2026-08-11 · implements ADR-006 · records the representation ADR-006 required to be recorded · amends ADR-006 and `ARCHITECTURE.md` §2.2 on one point · touches no T01–T05 outcome
+
+**Context.** ADR-006 decided that `tax_schedules` and `fee_schedules` must reject overlapping effective periods in the database, and left one thing open for the implementing task: *"record in the T05A PR whether `tstzrange(effective_from, effective_to, '[)')` is used inline or a generated range column is added. Both are acceptable; the choice must be consistent across the two tables."* This ADR is that record. It also documents one behaviour of the finished constraints that neither ADR-006 nor `ARCHITECTURE.md` §2.2 anticipated, and that T33 has to handle.
+
+**Decision 1 — the range is `daterange(effective_from, effective_to, '[)')`, inline, identical on both tables.**
+
+Neither option ADR-006 named is taken as written, for reasons only visible once T03's actual columns are read.
+
+**Not `tstzrange`, because the columns are `date`.** `ARCHITECTURE.md` §2.2 and ADR-006 both describe these ranges in the language of instants — "a version ending at time T" — but T03 created `effective_from` and `effective_to` as `date` on both tables. Building a `tstzrange` over them requires a cast, and casting `date` to `timestamptz` invents a timezone: midnight in whose zone? For a rate that changes on the 1st, the answer would have to be the same in every locale the schedule applies to, and a `timestamptz` boundary derived from a `date` silently is not — it resolves against whatever `TimeZone` the writing session happened to carry. `daterange` keeps the column's own resolution and adds no hidden zone. **ADR-006 and §2.2 are amended on this point:** the semantics they specify are unchanged, only the range type is.
+
+**Not a generated or stored range column, because it would duplicate live state.** A stored range restates what two columns already say, needs a generated column or a trigger to stay honest with them, and changes the generated TypeScript surface for no gain. The inline expression is derived at index time and cannot disagree with its source columns. It also kept `src/types/database.ts` byte-identical, which is what T05A's acceptance criteria ask for.
+
+The interval semantics ADR-006 specified are implemented exactly and are asserted in both directions on both tables:
+
+- **`[from, to)`** — `effective_from` inclusive, `effective_to` exclusive. A version ending on T and its successor starting on T are **adjacent, not overlapping**, and both are accepted. This is the normal shape of a version bump; a constraint that rejected it would be dropped by the first person who had to bump a rate.
+- **`effective_to IS NULL` is an unbounded upper edge**, not an exemption. Two open-ended rows for one key overlap on `[max(from), ∞)` and are rejected. This is the case worth spending a constraint on: the current row is precisely the row most likely to be NULL-terminated and the row every resolution query reads, so a NULL that dropped out of overlap detection would leave the constraint protecting everything except the thing it exists to protect.
+
+**Decision 2 — T03's existing `CHECK (effective_to IS NULL OR effective_to > effective_from)` is verified, not re-created.**
+
+T05A's acceptance criteria call for that check on both tables. T03 had already created it, as `tax_schedules_effective_range` and `fee_schedules_effective_range`. A second copy would leave two constraints with one purpose, either droppable without a test going red — the trap `RUNBOOK.md`'s financial checklist §1 names and that ADR-0010 applied to the ledger trigger. The migration instead **asserts** both in a `do` block and aborts if either is absent.
+
+That assertion is load-bearing rather than defensive housekeeping, and the reason is specific to the range representation chosen above: `daterange(d, d, '[)')` is not an error, it is the **empty** range, and an empty range overlaps nothing. If the check constraint were ever dropped, `effective_to = effective_from` rows would be accepted and would sit outside the exclusion index entirely — invisible to the constraint, and invisible to any resolution query. **The check is what makes the exclusion constraint total**, and the two must now be understood as one mechanism rather than two independent ones.
+
+**Decision 3 — the same user mistake surfaces as a different SQLSTATE on each table, and that is accepted rather than normalised.**
+
+An identical effective period for the same key is rejected on both tables, but not by the same constraint:
+
+| Table | Identical period, same key | Why |
+|---|---|---|
+| `tax_schedules` | **`23505`** unique_violation | T03's `unique (country_code, effective_from)` is an older index and is checked first |
+| `fee_schedules` | **`23P01`** exclusion_violation | its T03 unique is on `(marketplace_id, version)` — a *label*, not a period — so nothing older catches it |
+
+Every other kind of overlap raises `23P01` on both tables. The asymmetry is not introduced here and is not worth engineering away: dropping T03's unique to make the codes uniform would remove a working constraint to improve an error message.
+
+It does, however, make `fee_schedules` the table this task actually changes the reachable behaviour of. Its unique constrained the version *label*, so `v2024` and `v2024-revised` could previously cover identical dates — exactly the overlap AC16.4's versioned editing invites, and exactly what ADR-006 predicted a human would eventually do by hand.
+
+**Decision 4 — `btree_gist` is created in `extensions`, and its default `PUBLIC` execute grant is left alone.**
+
+The equality half of each constraint (`country_code with =`, `marketplace_id with =`) needs `gist_text_ops` / `gist_uuid_ops`; GiST indexes ranges natively via `pg_catalog.range_ops` but not scalars. The extension is created idempotently in `extensions`, matching `pgcrypto`, `uuid-ossp` and `pg_net`.
+
+T05A's acceptance criteria ask the migration to note that extension objects are not granted to `anon` or `authenticated`. Stated precisely: **that is not what happens for any extension**, here or elsewhere. PostgreSQL grants `EXECUTE` to `PUBLIC` on extension functions at creation, and ADR-004's `ALTER DEFAULT PRIVILEGES` in `20260810033236_normalise_privileges.sql` deliberately scope to schema `public`, not `extensions`. The grant is left in place: btree_gist's functions are GiST opclass internals invoked by the index machinery, they expose no row, column or table, and revoking would single out one extension for treatment none of its neighbours in a Supabase-managed schema receives. What default-deny actually promises is unchanged and is asserted rather than assumed — `anon` and `authenticated` hold no table privilege of any kind in `public`, and btree_gist creates no table, view or sequence and installs nothing into `public`.
+
+**Consequences.**
+
+- **T08 is unblocked.** The seed is now written against enforced constraints, so it cannot commit an overlap as fixture data — the reason ADR-006 made T05A block it.
+- **T13's `MarketContext` resolver** may rely on `effective_from <= d AND (effective_to IS NULL OR effective_to > d)` returning at most one row per key, and must treat **zero** rows as a legitimate answer. A date before any version, or in a deliberate gap, resolves to nothing; that is a missing schedule and the caller must fail visibly rather than fall back to an arbitrary row. The constraint guarantees "never two", not "always one".
+- **T33's schedule editor must map `23P01` *and* `23505` to the same user-facing message** — "this period overlaps an existing version" — per the table above. ADR-006 already required violations to surface as clear errors rather than a 500; this names the two codes it will actually see.
+- **The constraints govern `UPDATE` as well as `INSERT`**, which is the path T33 takes. Both directions are tested.
+- **No supporting index was added.** Each `EXCLUDE` *is* a GiST index on `(key, range)` — the index the resolution query wants — so a second btree would be dead weight.
+- **`ARCHITECTURE.md` §2.2's temporal convention** is unchanged in substance; only its implied range type is amended, above.

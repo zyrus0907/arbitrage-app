@@ -4,7 +4,7 @@
 **Document owner:** Technical Project Manager
 **Version:** 2.3 — global-first, marketplace-agnostic, Amazon-first MVP
 **Source documents:** `ARCHITECTURE.md` v2.0 (technical contract) · `PRODUCT_SPEC.md` v2.0 (scope contract)
-**Status:** In execution. **T01–T05 complete.** Next task: T05A.
+**Status:** In execution. **T01–T05A complete.** Next task: T06.
 
 > **Execution scope:** Build a global-first core, but operate exactly one launch market during MVP. Amazon is the only marketplace integration in MVP. Country, currency, tax regime and marketplace must be data/configuration concepts, not hard-coded application assumptions.
 
@@ -325,7 +325,9 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
 
 ---
 
-## T05A — Temporal integrity constraints on versioned schedules
+## ✅ T05A — Temporal integrity constraints on versioned schedules
+
+> **Status: COMPLETE.**
 
 - **Goal:** Make overlapping effective ranges impossible for `tax_schedules` and `fee_schedules`, so that "the schedule effective for this market on this date" always resolves to exactly one row.
 - **Agent:** Database Engineer
@@ -351,6 +353,8 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
   - `effective_to <= effective_from` → **rejected**.
   - A resolution query for a given key and date returns exactly one row across all the accepted fixtures above.
 - **Priority:** P0
+- **Completion note:** `20260810230623_schedule_temporal_integrity.sql` applied locally from a clean `db:reset` and pushed to the linked development project; all six migrations match local and remote, and `supabase db diff --linked --schema public` reports no schema changes. Two `EXCLUDE USING gist` constraints added — `tax_schedules_no_overlapping_periods` keyed by `country_code` and `fee_schedules_no_overlapping_periods` keyed by `marketplace_id` — both over **`daterange(effective_from, effective_to, '[)')`** inline, with no stored range column and no new table, column, sequence, function or trigger. **`daterange`, not the `tstzrange` ADR-006 offered:** T03 created both period columns as `date`, and a cast to `timestamptz` would invent a timezone for a boundary that must fall on the same calendar day everywhere the schedule applies (ADR-0012). `btree_gist` 1.7 created idempotently in `extensions` — required only by the equality half of each constraint, since GiST indexes ranges natively but not scalars. **T03's `CHECK (effective_to IS NULL OR effective_to > effective_from)` is verified by a `do` block, not duplicated:** it is what keeps the exclusion constraints total, because `daterange(d, d, '[)')` is the *empty* range and would otherwise escape them entirely. Both constraints govern `UPDATE` as well as `INSERT`, which is the path T33's editor takes. **76 new pgTAP assertions** in `schedule_temporal_integrity.test.sql` — 15 tax cases and 16 fee cases covering bounded, adjacent, overlapping, containing, identical, open-ended, second-open-ended, bounded-against-open-ended, gap-filling-adjacent-on-both-edges, degenerate and update paths, plus resolution-query proofs that a key/date returns exactly one row mid-period, on a boundary (the successor, per `[)`), and far in the future — and zero rows in a gap, which the resolver must treat as a missing schedule rather than fall back on. Suite green: **442 pgTAP assertions** (76 new, 366 prior unchanged) plus 88 application tests, with typecheck, lint and build clean. The migration grants nothing and revokes nothing: `anon` and `authenticated` still hold no privilege of any kind in `public`, `service_role` keeps exactly its four DML privileges on both tables, RLS stays enabled with zero policies — verified on local and on remote. `src/types/database.ts` regenerated from the linked project is byte-identical, so it is not recommitted.
+- **Decisions recorded:** ADR-0012, which supplies the representation record ADR-006 required and amends ADR-006 and `ARCHITECTURE.md` §2.2 on the range type only. It also documents three things the planning ADR could not have known: that the two tables reject an *identical* period with different SQLSTATEs (`23505` on `tax_schedules`, where T03's `unique (country_code, effective_from)` is checked first; `23P01` on `fee_schedules`, whose unique governs the version *label* — so T33 must map both codes to one message); that the T03 check constraint and the exclusion constraint are one mechanism rather than two; and that `btree_gist`'s support functions keep PostgreSQL's default `PUBLIC` execute grant, as every other extension here does, stated precisely rather than as the acceptance criterion's approximation.
 
 ---
 
@@ -1212,16 +1216,16 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
 
 # NEXT 5 TASKS TO EXECUTE
 
-**Completed:** T01 (repo, CI, deploy) · T02 (Supabase, clients, migrations) · T03 (11 core tables, 9 enums, RLS enabled, privileges normalised — ADR-004) · T04 (deals, user activity, cross-market consistency by composite FK — ADR-0008; deal lifecycle `draft | active | retired` — ADR-0009).
+**Completed:** T01 (repo, CI, deploy) · T02 (Supabase, clients, migrations) · T03 (11 core tables, 9 enums, RLS enabled, privileges normalised — ADR-004) · T04 (deals, user activity, cross-market consistency by composite FK — ADR-0008; deal lifecycle `draft | active | retired` — ADR-0009) · T05 (credit ledger, per-currency pack pricing, operational logs — ADR-0011) · T05A (temporal exclusion constraints on both schedule tables — ADR-0012).
 
-**Next task: T05.** Give these to coding agents in this exact order. Do not start one until the previous task's acceptance criteria are verified.
+**Next task: T06.** Give these to coding agents in this exact order. Do not start one until the previous task's acceptance criteria are verified.
 
-### 1. T05 — Credits, per-currency billing and operational logs
+### 1. ✅ T05 — Credits, per-currency billing and operational logs — COMPLETE
 **Agent:** Database Engineer · **Depends on:** T03  
 Create the append-only ledger, currency-neutral packs, per-currency pack prices, webhook events and market/provider operational logs. Ledger immutability (trigger **and** revoked `service_role` privileges) and financial-record retention (`ON DELETE RESTRICT`) are built here, per ADR-0010.  
 *Why first:* this makes credits global without making every unlock price country-specific — and the source of truth for money must never exist in a mutable state, not even for one migration.
 
-### 2. T05A — Temporal integrity constraints on versioned schedules
+### 2. ✅ T05A — Temporal integrity constraints on versioned schedules — COMPLETE
 **Agent:** Database Engineer · **Depends on:** T03 · **Blocks:** T08  
 Exclusion constraints preventing overlapping effective ranges on `tax_schedules` (per country) and `fee_schedules` (per marketplace), with `[)` semantics and correct open-ended handling.  
 *Why second:* it must exist before T08 seeds a single schedule row, and it permanently removes a class of silent, market-wide wrongness (risks #2 and #3).
