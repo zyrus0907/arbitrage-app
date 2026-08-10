@@ -25,7 +25,7 @@ v2.0 removes two hardcoded assumptions — *the country is the UK* and *the mark
 | Scoring | fixed 5 components | capability-aware: components that a marketplace cannot supply are dropped and weights renormalised, visibly |
 | Pricing display | £ hardcoded | `Intl.NumberFormat` with user locale + deal currency; no currency symbol in code |
 
-**Reconciliation required:** `PRODUCT_SPEC.md` v1.0 §0.3 and `TASKS.md` v1.0 still assert UK-only. They must be updated to reference this document. Nothing in v2.0 invalidates their *sequence* — only their geographic and marketplace assumptions.
+**Reconciliation status:** ✅ **Complete.** `PRODUCT_SPEC.md` v2.0 and `TASKS.md` v2.1 are both reconciled to this document and reference it as the technical contract. The earlier v1.0 UK-only assumptions no longer exist in either document. Nothing in v2.0 invalidated their *sequence* — only their geographic and marketplace assumptions.
 
 ---
 
@@ -228,8 +228,19 @@ MVP seeds: Amazon locales only. `capabilities` drives §8.7. `fulfilment_program
 
 `surcharges` is a list, not a column — this is what replaces v1.0's hardcoded `digital_services_fee_bps`. Each entry: `{code, label, basis: 'referral_fee'|'sell_price'|'flat', rate_bps|amount_minor, applies_to_countries?}`. A new marketplace levy becomes a row edit.
 
-**`fx_rates`** — Phase 3 use, seeded now for admin reporting only
-`base_currency, quote_currency, rate_ppm (parts per million, bigint), as_of, source` — **never used in MVP deal maths** (§7.7).
+**`fx_rates`** — **deferred to Phase 3. Not created in the MVP** (ADR-005)
+Shape when it arrives: `base_currency, quote_currency, rate_ppm (parts per million, bigint), as_of, source`.
+
+> **Why it is not created now.** The MVP has no consumer for it: deals are single-currency (§7.6), cross-border sourcing is Phase 3 (§0.1 assumption 7, §7.7), risk #4 states plainly that there is **no FX in the MVP at all**, and `PRODUCT_SPEC.md` AC2.7 forbids the user from even selecting a combination that would require conversion. An empty table with no consumer is not free — it is an invitation for a later service to join it and convert a currency, and a silent FX error looks exactly like a great deal. It is created in Phase 3, at the point of the first genuine cross-border or multi-currency reporting requirement, and never before. Until then, no table, no FK, no reference to it anywhere under `src/services/`.
+
+**Temporal convention for versioned schedules.** `tax_schedules` and `fee_schedules` are versioned by an `effective_from`/`effective_to` pair, and the resolution query ("the schedule effective for this key on this date") must return **exactly one row**. This is enforced in the database by exclusion constraints, not by seeding convention (ADR-006):
+
+- Ranges are **half-open, `[)`** — inclusive of `effective_from`, exclusive of `effective_to`. A version ending at time T and its successor starting at time T are adjacent, not overlapping, and both are valid. This is the normal shape of a version bump.
+- **`effective_to IS NULL` means open-ended/current**, and participates in overlap detection as an unbounded upper edge. Two open-ended rows for the same key are rejected — the current row is precisely the one most likely to be NULL-terminated, so a NULL that dropped out of the constraint would defeat its purpose.
+- Overlapping ranges are rejected per `country_code` for `tax_schedules` and per `marketplace_id` for `fee_schedules`. Overlaps across *different* keys are of course permitted.
+- `effective_to`, when non-null, must be strictly greater than `effective_from`.
+
+> Without this, two overlapping rows make the resolver return whichever row the query plan happens to reach first — stable enough to pass tests, unstable enough to change after an unrelated `VACUUM`. Every profit figure in that market then becomes systematically wrong, which is risk #2 and risk #3 realised silently.
 
 ### 2.3 Core tables
 
@@ -540,17 +551,20 @@ Unchanged from v1.0 in substance. Two additions for global operation.
 
 ### 6.3 Authorization: RLS policy design
 
-**Default deny.** RLS on every table; no policy means unreachable by anon/authenticated keys.
+**Default deny, at two layers.** RLS is enabled on every table, and — established in T03, ADR-004 — `anon` and `authenticated` hold **no table privileges by default**; `service_role` holds table DML only; functions are owner-only. **A policy and a SQL grant are both required for access, and neither works alone:** RLS filters rows *within* privileges already held, so a policy without a matching grant is inert, and a grant without a matching policy is an ungoverned privilege. Every migration that creates a table, function, view or sequence states its privilege posture explicitly and revokes any Postgres or Supabase default grant in the same migration.
 
-| Table | Policy |
-|---|---|
-| `profiles` | SELECT/UPDATE where `id = auth.uid()`; `credit_balance` not directly updatable. |
-| `credit_ledger` | SELECT own rows. **No write policy at all** — writes only via `SECURITY DEFINER` RPC. |
-| `deal_unlocks`, `watchlist_items`, `purchase_records`, `barcode_lookups` | SELECT/INSERT/DELETE where `user_id = auth.uid()`. |
-| `deals`, `retailer_products`, `marketplace_products`, `product_matches` | **No policies. Service-role only.** Access via server routes that apply redaction. |
-| `markets`, `marketplaces`, `countries`, `currencies` | SELECT where `active = true` (public read — the client needs to render a currency and a market name). |
-| `credit_packs`, `credit_pack_prices` | SELECT where `active = true`. |
-| `fee_schedules`, `tax_schedules`, logs, runs | service-role only. |
+| Table | Policy | Grant to `anon`/`authenticated` |
+|---|---|---|
+| `profiles` | SELECT/UPDATE where `id = auth.uid()`; `credit_balance` not directly updatable. | `SELECT, UPDATE` (authenticated) |
+| `credit_ledger` | SELECT own rows. **No write policy at all** — writes only via `SECURITY DEFINER` RPC. | `SELECT` only (authenticated) |
+| `deal_unlocks`, `watchlist_items`, `purchase_records`, `barcode_lookups` | SELECT/INSERT/DELETE where `user_id = auth.uid()`. | matching per-operation grants (authenticated) |
+| `deals`, `retailer_products`, `marketplace_products`, `product_matches` | **No policies. Service-role only.** Access via server routes that apply redaction. | **none** |
+| `markets`, `countries`, `currencies` | SELECT where `active = true` (public read — the client needs to render a currency and a market name). | `SELECT` |
+| `credit_packs`, `credit_pack_prices` | SELECT where `active = true`. | `SELECT` |
+| `marketplaces` | **No policy. Service-role only** (ADR-008). | **none** |
+| `fee_schedules`, `tax_schedules`, logs, runs | service-role only. | **none** |
+
+**Why `marketplaces` is not public read:** it carries `adapter_key` and `capabilities`, which are integration internals, and no MVP client surface needs it — the feed is market-scoped server-side, and rendering a currency and a market name needs `currencies` and `markets` only. If a client need emerges, expose a view with the specific columns required rather than granting the table.
 
 **Why deals are not client-readable:** the paid product *is* the identity of the product. Column-level RLS to hide it is fragile and one mistake from giving it away. Server-side redaction is one function, one test, one place to get right.
 
@@ -675,7 +689,7 @@ One deal, one currency, no conversion. Enforced at three layers: a check constra
 
 Buying in one currency and selling in another adds: FX rate selection and timing, spread and card fees, import duty and customs, import VAT/GST, cross-border shipping, and the marketplace's own currency conversion. Each is a source of error large enough to invert a profit figure.
 
-The schema is ready for it — `fx_rates` exists, deals carry an explicit currency, retailers carry a country — but **no cross-currency deal may be computed until a dedicated landed-cost model exists.** Building it now would put the least reliable numbers in the product at exactly the moment you are trying to establish that your numbers can be trusted.
+The schema is *shaped* for it — deals carry an explicit currency and retailers carry a country — but **`fx_rates` is deliberately not created in the MVP** (ADR-005), and **no cross-currency deal may be computed until a dedicated landed-cost model exists.** The FX table arrives with the landed-cost model, not before it: an unused rate table is the thing a later service joins to by accident. Building it now would put the least reliable numbers in the product at exactly the moment you are trying to establish that your numbers can be trusted.
 
 ---
 

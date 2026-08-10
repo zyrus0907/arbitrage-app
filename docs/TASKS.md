@@ -2,9 +2,9 @@
 
 **Project:** Global Retail-to-Marketplace Arbitrage App
 **Document owner:** Technical Project Manager
-**Version:** 2.0 — global-first, marketplace-agnostic, Amazon-first MVP
+**Version:** 2.1 — global-first, marketplace-agnostic, Amazon-first MVP
 **Source documents:** `ARCHITECTURE.md` v2.0 (technical contract) · `PRODUCT_SPEC.md` v2.0 (scope contract)
-**Status:** Execution plan. No application code written yet.
+**Status:** In execution. **T01–T03 complete.** Next task: T04.
 
 > **Execution scope:** Build a global-first core, but operate exactly one launch market during MVP. Amazon is the only marketplace integration in MVP. Country, currency, tax regime and marketplace must be data/configuration concepts, not hard-coded application assumptions.
 
@@ -19,11 +19,25 @@
 - Added `MarketContext`, marketplace capabilities, market-scoped APIs/pipelines, multi-currency credit pricing and cross-market isolation tests.
 - Preserved single-market launch, Amazon-only MVP integration and the original phased delivery discipline.
 
+## Changelog: v2.0 → v2.1
+
+Planning corrections arising from the T03 post-completion review. **No product scope changed. No priority changed. No task was removed.**
+
+- Marked T01–T03 complete with outcome notes.
+- Corrected two corrupted acceptance criteria in T03 that instructed deletion of the table T03 was built to create.
+- Recorded the T03 privilege posture (ADR-004) and propagated its consequences into T04, T05, T06, T07 and T08.
+- **Added T05A** — temporal exclusion constraints on `tax_schedules` and `fee_schedules`. Blocks T08.
+- Added cross-market consistency enforcement to T04 and replaced an incoherent T04 test criterion.
+- Enumerated the previously under-specified `deals` and `watchlist_items` columns in T04.
+- Rewrote T09's assertions so a missing SQL grant can no longer produce a false pass.
+- Deferred `fx_rates` to Phase 3 (ADR-005); stated as out of scope in T08.
+- Added global rule 8 (privilege posture on every migration).
+
 ---
 
 ## 0. How to use this document
 
-44 tasks: **T01–T40 are P0** (beta cannot start without them), **T41–T44 are P1** (ship during beta only if the P0 loop is stable). P2 items from `PRODUCT_SPEC.md` §5.3 appear nowhere in this plan by design.
+45 tasks: **T01–T40 (including T05A) are P0** (beta cannot start without them), **T41–T44 are P1** (ship during beta only if the P0 loop is stable). P2 items from `PRODUCT_SPEC.md` §5.3 appear nowhere in this plan by design.
 
 **Rules of engagement for every task:**
 
@@ -34,6 +48,7 @@
 5. **All money is integer minor units with an explicit ISO 4217 currency; all rates are basis points.** `src/lib/money/` is the only place currency arithmetic exists. Currency exponent is data, never an assumed ×100.
 6. **Every task ships with tests and testing instructions.** No exceptions for "obvious" tasks.
 7. **State assumptions explicitly** in the PR description.
+8. **Every migration that creates a table, function, view or sequence must state its privilege posture explicitly** — which of `anon`, `authenticated` and `service_role` receive which privileges, and why. Silence is not a posture. Default-deny is the baseline established in T03 (ADR-004): new objects receive **no** `anon` or `authenticated` privileges unless a later task grants them deliberately, and any privilege Supabase or Postgres grants by default is revoked in the same migration. RLS being enabled is not a substitute — RLS filters rows *within* granted privileges, so a policy without a matching grant is inert, and a grant without a matching policy is a leak.
 
 **Agent roles:** Backend Engineer · Frontend Engineer · Database Engineer · Integration Engineer · Code Reviewer / Security Reviewer · QA Engineer
 
@@ -41,11 +56,13 @@
 
 ---
 
-# PHASE 1 — FOUNDATION (T01–T11)
+# PHASE 1 — FOUNDATION (T01–T11, including T05A)
 
 ---
 
-## T01 — Repository, tooling, CI and first deploy
+## ✅ T01 — Repository, tooling, CI and first deploy
+
+> **Status: COMPLETE.**
 
 - **Goal:** A running, deployed, type-safe Next.js skeleton with validated environment variables and a green CI pipeline. Nothing else.
 - **Agent:** Backend Engineer
@@ -61,10 +78,13 @@
   - GitHub secret scanning and push protection enabled.
 - **Testing requirements:** One smoke test asserting the home route renders. One unit test asserting `env.ts` throws when a required variable is absent. Verification: push a branch, confirm CI green and a preview URL loads.
 - **Priority:** P0
+- **Completion note:** Next.js + TypeScript repo foundation in place. CI green on GitHub. Vercel deployment working.
 
 ---
 
-## T02 — Supabase project, migrations harness and typed clients
+## ✅ T02 — Supabase project, migrations harness and typed clients
+
+> **Status: COMPLETE.**
 
 - **Goal:** Three correctly scoped Supabase clients and a working local-to-remote migration workflow. No tables yet.
 - **Agent:** Database Engineer
@@ -78,10 +98,13 @@
   - No Supabase key other than `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` is referenced anywhere reachable from client code.
 - **Testing requirements:** A build-time test that importing `admin.ts` from a `'use client'` module fails the build. Manual: apply an empty migration end to end.
 - **Priority:** P0
+- **Completion note:** Supabase dev project created and linked. Local Supabase tooling configured. Browser/server/admin clients added. Generated database types working. Migration workflow documented in `docs/RUNBOOK.md`.
 
 ---
 
-## T03 — Schema A: global reference data, identity and catalogue
+## ✅ T03 — Schema A: global reference data, identity and catalogue
+
+> **Status: COMPLETE.**
 
 - **Goal:** Create the global configuration layer and core catalogue without hard-coding a country, currency or marketplace.
 - **Agent:** Database Engineer
@@ -92,16 +115,20 @@
   - Create identity/catalogue tables: `profiles`, `retailers`, `retailer_products`, `marketplace_products`, `product_matches`.
   - `profiles` contains `country_code`, `default_market_id`, `locale`, `timezone`, `tax_registered`, `tax_registration_country`, `tax_scheme`, `default_fulfilment`, default cost assumptions and `assumption_currency`.
   - `retailer_products` stores canonical `gtin14` plus `gtin_raw` and `gtin_format`; there are no GTIN-only or UPC-only primary matching columns.
-  - `marketplace_products` uses `(marketplace_id, external_id)` as the marketplace identity. marketplace external ID is not a schema-level concept.
+  - `marketplace_products` uses `(marketplace_id, external_id)` as the marketplace identity. **ASIN is not a schema-level concept** — it is one possible value of `external_id`, and the string "asin" appears only inside adapter code and `provider_raw`.
   - All monetary columns are `bigint` minor units and every monetary record carries an explicit `currency` code.
   - `currencies.minor_unit_exponent` supports 0-, 2- and 3-decimal currencies.
   - `markets` connects source country, marketplace and currency and has `launch_status`.
   - `profiles.id` FKs `auth.users.id` with cascade delete; a trigger creates a profile on signup.
   - Unique constraints and indexes follow ARCHITECTURE.md §2, including `(retailer_id, retailer_sku)`, GIN on marketplace-product GTINs, `retailer_products.gtin14`, and refreshed timestamps.
   - RLS enabled on every table with no policies yet.
-  - **No table named `marketplace_products` exists.**
-- **Testing requirements:** SQL tests for key unique constraints and cascade deletion. Seed at least GBP, USD and JPY currency rows and prove the schema accepts each. Test that a UPC-12 and GTIN-13 form can normalise to the same canonical GTIN-14 fixture at the application-test layer.
+  - **No table named `amazon_products` exists.** The v1.0 Amazon-specific table is replaced by `marketplace_products`; no marketplace-specific table may be created in its place.
+  - **Privilege posture (added v2.1, see ADR-004):** `anon` and `authenticated` receive no table privileges. `service_role` receives table DML only. Functions are owner-only by default. Any Postgres or Supabase default grant is revoked in the same migration.
+- **Testing requirements:** SQL tests for key unique constraints and cascade deletion. Seed at least GBP, USD and JPY currency rows and prove the schema accepts each. Test that a UPC-12 and EAN-13 form can normalise to the same canonical GTIN-14 fixture at the application-test layer.
 - **Priority:** P0
+- **Completion note:** 11 core tables and 9 enum types created. RLS enabled on all 11 tables with zero policies. Local and remote privilege state normalised — `anon`/`authenticated` hold no table privileges, `service_role` holds table DML only, functions are owner-only. Database tests pass; local and remote migration history match.
+- **Decisions recorded:** ADR-004 (database privilege posture). **Two downstream consequences, now written into the tasks themselves:** T06 must issue explicit `GRANT SELECT` alongside every public-read RLS policy, and T07 must issue explicit `GRANT EXECUTE … TO service_role` for the credit RPCs. Neither is optional; without them the policies and functions are unreachable.
+- **Known gaps found during T03, now owned elsewhere:** `fx_rates` is deferred to Phase 3 (ADR-005, stated in T08); `tax_schedules` and `fee_schedules` temporal overlap is owned by the new **T05A**.
 
 ---
 
@@ -112,16 +139,52 @@
 - **Dependencies:** T03
 - **Files / areas:** `supabase/migrations/*_schema_b.sql`, `src/types/database.ts`
 - **Acceptance criteria:**
-  - `deals` matches ARCHITECTURE.md v2.0 §2.3, including `market_id`, `currency`, tax/fee schedule references, itemised costs/fees, `surcharges jsonb`, outputs, score breakdown, version stamps, `inputs_snapshot`, timestamps and status.
-  - `deals` references `retailer_product_id` and `marketplace_product_id`, never marketplace external ID directly.
-  - One current active deal per `(retailer_product_id, marketplace_product_id)` via partial unique index.
+
+  **`deals` — full column set per ARCHITECTURE.md §2.3.** Enumerated here because "matches §2.3" has previously been read loosely; a missing column here is not discovered until T19:
+  - Identity and scope: `id`, `market_id` FK, `retailer_product_id` FK, `marketplace_product_id` FK, `match_confidence` (numeric, copied from `product_matches` for fast filtering), `currency` FK
+  - Costs: `buy_price_minor`, `buy_price_tax_treatment`, `buy_tax_reclaim_minor`, `inbound_shipping_minor`, `prep_cost_minor`
+  - Revenue: `sell_price_minor`, `sell_tax_liability_minor`
+  - Fees: `referral_fee_minor`, `fulfilment_fee_minor`, `storage_fee_minor`, `other_fees_minor`, `surcharges jsonb`, `fee_schedule_id` FK, `tax_schedule_id` FK
+  - Outputs: `net_profit_minor`, `roi_bps` int, `margin_bps` int, `deal_score` int, `demand_band`, `competition_band`, `stability_band`, `confidence_band`, `score_breakdown jsonb`
+  - Provenance: `calc_version`, `score_version`, `inputs_snapshot jsonb`, `computed_at`, `expires_at`, `status`
+  - `deals` references `retailer_product_id` and `marketplace_product_id`, never a marketplace external ID directly.
+  - One current active deal per `(retailer_product_id, marketplace_product_id)` via partial unique index on `status = 'active'`.
   - Market leads feed indexes: `(market_id, status, deal_score desc)`, `(market_id, status, roi_bps desc)`, `(market_id, status, computed_at desc)`.
-  - Create `deal_unlocks`, `watchlist_items`, `purchase_records`, `barcode_lookups`.
-  - `purchase_records` stores `market_id`, `currency`, frozen expected profit and a frozen inputs snapshot.
-  - `barcode_lookups` stores raw barcode, canonical `gtin14`, `market_id` and resolved `marketplace_product_id`.
-  - Check constraints prevent missing currency on money-bearing rows and constrain `deal_score` to 0–100.
-  - RLS enabled, no policies yet.
-- **Testing requirements:** SQL tests for partial unique index, score constraint, market foreign keys and currency-required constraints. Test that two markets can hold independent deals for the same canonical product pair where the marketplace differs.
+  - Check constraints: `deal_score` between 0 and 100; `roi_bps` and `margin_bps` are integers; no money-bearing row without a currency.
+
+  **Cross-market consistency — new in v2.1 (ADR-007).** A `deals` row must not be able to reference a retailer product and a marketplace product that do not both belong to its market. This is enforced **in the database**, not by pipeline convention:
+  - `deals.market_id` must equal the market of `retailer_product_id`'s retailer.
+  - `deals.marketplace_product_id`'s `marketplace_id` must equal the `marketplace_id` of `deals.market_id`.
+  - Implement by whichever of the two available mechanisms the engineer judges cleaner, and record the choice in the PR: (a) denormalise the parent keys onto `deals` and enforce with composite foreign keys, or (b) a `CONSTRAINT TRIGGER` on insert and update. Prefer (a) — declarative constraints cannot be bypassed by a `COPY` or a service-role bulk upsert, and the ingestion pipeline in T19 does bulk upserts.
+  - Whichever is chosen, the violation must fail the write. A cross-market deal that merely fails to appear in a feed is not acceptable: it is a user in one country seeing another country's price.
+
+  **Other tables:**
+  - `deal_unlocks`: `id`, `user_id`, `deal_id`, `credits_spent`, `unlocked_at`; unique `(user_id, deal_id)`.
+  - `watchlist_items` — full column set per §2.3: `id`, `user_id`, `deal_id`, `marketplace_product_id`, `target_profit_minor`, `currency`, `note`, `created_at`; unique `(user_id, deal_id)`.
+  - `purchase_records`: `id`, `user_id`, `deal_id`, `market_id`, `units`, `actual_buy_price_minor`, `currency`, `expected_profit_minor` (frozen snapshot), `purchased_at`, `outcome`, `actual_sale_price_minor`, `actual_profit_minor`, `notes`, plus a frozen inputs snapshot.
+  - `barcode_lookups`: `id`, `user_id`, `market_id`, `barcode_raw`, `gtin14`, `resolved_marketplace_product_id`, `credits_spent`, `result jsonb`, `created_at`.
+
+  **Enum discipline — new in v2.1:**
+  - T03 created 9 enum types. **Inventory the existing types before creating any new one** and reuse where the domain matches. In particular, the four band columns share one domain (`low|medium|high`) and must use **one** shared enum type reused four times, not four near-identical types.
+  - Any genuinely new type is listed in the PR description with a one-line justification for why an existing type would not serve.
+
+  **Privilege posture — new in v2.1 (ADR-004, global rule 8):**
+  - RLS enabled on every new table, **no policies yet** — policies and grants both land in T06.
+  - **No privileges granted to `anon` or `authenticated`** by this migration. `service_role` receives table DML only.
+  - Any default grant applied by Postgres or Supabase to new tables **and their sequences** is revoked in the same migration.
+  - The migration states its privilege posture in a header comment.
+
+  **Types:**
+  - After the migration is applied remotely, regenerate `src/types/database.ts` via `npm run db:types` and commit it. Local-only generation does not satisfy this.
+
+- **Testing requirements:** SQL tests for: the partial unique index (two active deals for one pair rejected, one active plus one retired accepted); the 0–100 score constraint at both boundaries and outside them; currency-required constraints; enum reuse verified by inspecting `pg_type` for near-duplicates.
+
+  **Cross-market rejection tests — replaces the previous two-markets test, which was incoherent** (if the marketplace differs then `marketplace_product_id` differs, so the pair is not the same pair; and a retailer product cannot belong to two markets because its retailer has exactly one `market_id`). Using two seeded markets in fixtures:
+  - Inserting a deal whose `market_id` differs from the market of its retailer product's retailer is **rejected**.
+  - Inserting a deal whose marketplace product belongs to a marketplace other than the one its `market_id` resolves to is **rejected**.
+  - A correctly-scoped deal in each of the two markets is **accepted**, and the two coexist without interference.
+  - Updating a valid deal's `market_id` to the other market is **rejected** (not just insert-time enforcement).
+  - The rejection must occur on a bulk/`COPY`-style write as well as a single-row insert.
 - **Priority:** P0
 
 ---
@@ -141,27 +204,69 @@
   - `ingestion_runs` includes `market_id`.
   - `app_events` includes `market_id`.
   - RLS enabled, no policies yet.
-- **Testing requirements:** Duplicate ledger idempotency key and Stripe event IDs are rejected. A pack can have GBP and USD prices without duplicating the pack itself. Regenerate and commit types.
+  - **Privilege posture — new in v2.1 (ADR-004, global rule 8):** no privileges granted to `anon` or `authenticated` by this migration; `service_role` receives table DML only; any Postgres or Supabase default grant on the new tables **and their sequences** is revoked in the same migration; the migration states its posture in a header comment. This applies to `credit_packs` and `credit_pack_prices` too — their public-read grants belong to T06, alongside their policies, not here.
+- **Testing requirements:** Duplicate ledger idempotency key and Stripe event IDs are rejected. A pack can have GBP and USD prices without duplicating the pack itself. Regenerate `src/types/database.ts` against the remote database and commit it.
+- **Priority:** P0
+
+---
+
+## T05A — Temporal integrity constraints on versioned schedules
+
+- **Goal:** Make overlapping effective ranges impossible for `tax_schedules` and `fee_schedules`, so that "the schedule effective for this market on this date" always resolves to exactly one row.
+- **Agent:** Database Engineer
+- **Dependencies:** T03 (creates both tables). Sequenced after T05. **Blocks T08** — the seed must be written against enforced constraints, or the seed itself can create the defect the constraint exists to prevent, and it will be committed as fixture data.
+- **Files / areas:** `supabase/migrations/*_schedule_temporal_integrity.sql`, `src/types/database.ts` (only if generated types change)
+- **Why this is schema and not seeding discipline:** `MarketContext` (T13) resolves a schedule by country/marketplace and date. With two overlapping rows, Postgres returns whichever row the plan happens to reach first — deterministic enough to pass tests, non-deterministic enough to change after an unrelated `VACUUM`. Every profit figure in that market is then systematically wrong, which is ARCHITECTURE.md risk #2 ("trust gone market-wide") and risk #3. Seeding discipline cannot hold it either, because T08 is not the only writer: T33 gives the admin console versioned fee-schedule editing (AC16.4), so a human will eventually create an overlap by hand, and the failure is silent.
+- **Acceptance criteria:**
+  - Enable the `btree_gist` extension **only if** the chosen constraint form requires it (an `EXCLUDE` mixing an equality key with a range overlap does; check whether it is already enabled before adding it).
+  - `tax_schedules`: exclusion constraint preventing two rows for the **same `country_code`** whose effective ranges overlap.
+  - `fee_schedules`: exclusion constraint preventing two rows for the **same `marketplace_id`** whose effective ranges overlap.
+  - **Half-open `[)` semantics.** A row ending at time T and a row starting at time T are adjacent, not overlapping, and both must be accepted — this is the normal shape of a schedule version bump and must not be rejected.
+  - **`effective_to IS NULL` means open-ended/current and must participate correctly in overlap detection.** A NULL that silently drops out of the constraint defeats the entire task, because the current schedule is exactly the row most likely to be NULL-terminated. Choose one representation — `tstzrange(effective_from, effective_to, '[)')` treats NULL as unbounded, or a generated range column — and record the choice in the ADR. Two open-ended rows for the same key must be rejected.
+  - `CHECK (effective_to IS NULL OR effective_to > effective_from)` on both tables.
+  - The migration must **not** silently drop or alter existing rows. If T03 or an earlier seed left data that violates the new constraint, the migration fails loudly and the data is corrected deliberately.
+  - **Privilege posture (global rule 8):** this migration adds constraints only. It grants nothing, revokes nothing, and says so in its header comment. If `btree_gist` is newly created, note that extension objects are not granted to `anon` or `authenticated`.
+  - Regenerate and commit `src/types/database.ts` **only if** the generated types change; a no-op regeneration should produce no diff.
+- **Testing requirements:** SQL tests proving, for both tables:
+  - Two rows for the same key with overlapping ranges → **rejected**.
+  - Two rows for the same key that are exactly adjacent under `[)` → **accepted**.
+  - Two open-ended rows (`effective_to IS NULL`) for the same key → **rejected**.
+  - One closed row and one open-ended row for the same key that overlap → **rejected**.
+  - Overlapping rows for **different** keys (different country, different marketplace) → **accepted**.
+  - `effective_to <= effective_from` → **rejected**.
+  - A resolution query for a given key and date returns exactly one row across all the accepted fixtures above.
 - **Priority:** P0
 
 ---
 
 ## T06 — RLS policies (default deny) and append-only enforcement
 
-- **Goal:** Every table locked down per §6.3, with ledger immutability enforced by the database rather than by convention.
+- **Goal:** Every table locked down per §6.3, with ledger immutability enforced by the database rather than by convention — and, after T03, with **grants and policies written together**, because neither works alone.
 - **Agent:** Database Engineer
-- **Dependencies:** T03, T04, T05
+- **Dependencies:** T03, T04, T05, T05A
 - **Files / areas:** `supabase/migrations/*_rls.sql`
+- **The rule this task now turns on (ADR-004):** T03 normalised privileges so `anon` and `authenticated` hold **nothing**. A policy grants no access on its own — RLS filters rows *within* privileges already held. So every policy in this task requires a deliberate, matching SQL `GRANT`, and every `GRANT` requires a deliberate, matching policy. One without the other is a defect in one of two directions: an inert policy, or an ungoverned privilege.
 - **Acceptance criteria:**
-  - RLS enabled on **every** table. Any table without an explicit policy is unreachable by the anon and authenticated keys.
-  - `profiles`: SELECT/UPDATE where `id = auth.uid()`; `credit_balance` is **not** directly updatable by the user (column-level restriction or update trigger rejecting a changed balance).
-  - `credit_ledger`: SELECT own rows only. **No INSERT, UPDATE or DELETE policy exists at all.**
-  - `deal_unlocks`, `watchlist_items`, `purchase_records`, `barcode_lookups`: SELECT/INSERT/DELETE where `user_id = auth.uid()`.
-  - `deals`, `retailer_products`, `marketplace_products`, `product_matches`: **no policies — service role only.**
-  - `countries`, `currencies`, `markets`, `marketplaces`: public SELECT where active/live rules permit. `credit_packs` and active `credit_pack_prices`: public SELECT.
-  - Everything else: service role only.
+  - RLS enabled on **every** table. Any table with neither a policy nor a grant is unreachable by the `anon` and `authenticated` roles.
+  - **Every policy added has a matching minimum grant, and every grant added has a matching policy.** The PR description contains a two-column table listing each table, its policies and its grants, so the correspondence is reviewable at a glance.
+  - **Grants are minimum-necessary and per-operation** — `GRANT SELECT` where only reads are needed, never blanket `ALL`.
+
+  **User-owned tables** (`authenticated` only):
+  - `profiles`: policy SELECT/UPDATE where `id = auth.uid()`; grant `SELECT, UPDATE`. `credit_balance` is **not** directly updatable by the user — enforce with a column-level grant restriction or an update trigger rejecting a changed balance.
+  - `credit_ledger`: policy SELECT own rows only; grant `SELECT` **only**. **No INSERT, UPDATE or DELETE policy and no such grant exists at all** — belt and braces, because this table is the source of truth for money.
+  - `deal_unlocks`, `watchlist_items`, `purchase_records`, `barcode_lookups`: policies SELECT/INSERT/DELETE where `user_id = auth.uid()`; grants `SELECT, INSERT, DELETE` to match. Note `deal_unlocks` DELETE is granted for symmetry only if the product requires it — if unlocks are permanent (AC10.7), **do not** grant DELETE and do not write the policy.
+
+  **Public reference tables** (`anon, authenticated`, `SELECT` only, active rows only):
+  - `countries`, `currencies`, `markets` (active/live rows only): policy + `GRANT SELECT`.
+  - `credit_packs` and active `credit_pack_prices`: policy + `GRANT SELECT`.
+  - **`marketplaces` is removed from the public-read set (new in v2.1, ADR-008).** It carries `adapter_key` and `capabilities`, which are integration internals. Nothing in the MVP client needs it: the feed is market-scoped server-side, and currency formatting needs `currencies` and `markets` only. Neither PRODUCT_SPEC nor ARCHITECTURE requires client access to it. If a client need emerges later, expose a view with the specific columns required — do not grant the table.
+
+  **Service-role-only tables** — `deals`, `retailer_products`, `marketplace_products`, `product_matches`, `tax_schedules`, `fee_schedules`, `credit_purchases`, `stripe_webhook_events`, `api_usage_log`, `ingestion_runs`, `app_events`:
+  - **No policies and no `anon`/`authenticated` grants of any kind.** Stated explicitly in the migration rather than left implicit, so a reviewer can see the decision was made.
+
+  **Immutability:**
   - Triggers on `credit_ledger` and `stripe_webhook_events` raise on UPDATE and DELETE (AC10.5).
-- **Testing requirements:** T09 covers this formally, but this task ships its own SQL smoke test proving the ledger rejects an UPDATE and a DELETE from the service role itself.
+- **Testing requirements:** T09 covers this formally, but this task ships its own SQL smoke tests proving: (a) the ledger rejects an UPDATE and a DELETE **from the service role itself**; (b) for one representative public-read table and one representative user-owned table, the `authenticated` role can actually read the rows it should — a policy that is inert for want of a grant must fail here, not at T09.
 - **Priority:** P0
 
 ---
@@ -176,9 +281,13 @@
   - Both functions are `SECURITY DEFINER` with `set search_path = public, pg_temp`.
   - `spend_credits(p_user, p_amount, p_reason, p_ref_type, p_ref_id, p_idem)` in one transaction: idempotency check (existing key ⇒ return the prior result, do not double-charge) → `SELECT ... FOR UPDATE` on the profile row → raise `INSUFFICIENT_CREDITS` if balance is short → insert ledger row with `balance_after` → update cached balance. Returns `(new_balance, ledger_id)`.
   - `grant_credits` mirrors this and permits a negative resulting balance (refunds and chargebacks, §9.2).
-  - Callable only by the service role.
+  - **Execute privileges are explicit (new in v2.1, ADR-004).** In the same migration as each function, and immediately after every `CREATE OR REPLACE`:
+    - `REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated;`
+    - `GRANT EXECUTE ON FUNCTION … TO service_role;`
+    - The revoke is **not optional even under T03's owner-only default**. Postgres grants `EXECUTE` to `PUBLIC` on function creation by default, and a later "fix the RPC" migration that uses `CREATE OR REPLACE` without re-revoking silently reopens it. A `SECURITY DEFINER` function with a public execute grant is a direct route to minting credits.
+    - Both statements appear in the same migration file as the function body, not in a separate hardening migration, so they cannot drift apart.
   - No "check then deduct" logic exists anywhere in application code.
-- **Testing requirements:** SQL/pgTAP tests: (a) insufficient balance raises and writes nothing; (b) the same idempotency key twice charges once; (c) two concurrent sessions spending the last credit — exactly one succeeds. Test (c) is the release gate for AC10.1 and must be automated, not manual.
+- **Testing requirements:** SQL/pgTAP tests: (a) insufficient balance raises and writes nothing; (b) the same idempotency key twice charges once; (c) two concurrent sessions spending the last credit — exactly one succeeds; (d) **a session acting as `authenticated` calling `spend_credits` or `grant_credits` receives a permission error and no ledger row is written**; (e) the same for `anon`. Test (c) is the release gate for AC10.1 and must be automated, not manual. Tests (d) and (e) must assert a *privilege* failure, not merely an absent result.
 - **Priority:** P0
 
 ---
@@ -187,7 +296,7 @@
 
 - **Goal:** Seed global reference data plus one fully verified launch market. This task proves the architecture is global while operations remain single-market.
 - **Agent:** Database Engineer
-- **Dependencies:** T03, T04, T05
+- **Dependencies:** T03, T04, T05, **T05A** — the temporal exclusion constraints must exist before any schedule row is seeded, or the seed can create the overlap the constraint prevents and commit it as fixture data.
 - **Files / areas:** `supabase/seed/`, `docs/DECISIONS.md`, `docs/MARKET_PLAYBOOK.md`
 - **Acceptance criteria:**
   - Seed ISO currency metadata for at least GBP, USD, EUR and JPY including `minor_unit_exponent`.
@@ -197,6 +306,9 @@
   - Seed at least three credit packs and per-currency `credit_pack_prices` for the launch currency. Other-currency prices may remain inactive until those markets open.
   - Seed 3–5 retailers in the chosen launch market with `source_type = 'curated'`.
   - Seed is idempotent.
+  - **`fx_rates` is out of MVP scope (ADR-005).** The table is not created and not seeded. The MVP is single-currency per deal (§7.6, AC2.7) and there is no MVP consumer; it arrives in Phase 3 with the first genuine cross-border or multi-currency reporting requirement. Do not create it "for later".
+  - **Seed operations are DML-only and execute as owner or `service_role`.** The seed performs no DDL, creates no privileges and alters no policies. If a seed appears to need DDL, that is a missing migration, not a seed change.
+  - **Exactly one live market is seeding and operational discipline, not a database constraint.** `launch_status` is a lever the admin console legitimately flips (T33), so no uniqueness constraint is added on it. The rule lives in `docs/MARKET_PLAYBOOK.md` and in the T40 release checklist, and is verified there.
   - `docs/MARKET_PLAYBOOK.md` contains the checklist for opening a new market: provider coverage, tax verification, fee verification, Stripe support, retailer supply, legal review, seed rows, launch status.
   - **Demonstrate a synthetic second market can be seeded without a migration or business-logic code change.**
 - **Testing requirements:** Run seed twice; counts remain stable. Resolve both the live launch market and the synthetic second market through the future `MarketContext` shape using fixtures. Verify fee-band coverage in the launch market has no gaps/overlaps.
@@ -210,14 +322,21 @@
 - **Agent:** QA Engineer
 - **Dependencies:** T06, T07, T08
 - **Files / areas:** `tests/integration/rls.test.ts`, `.github/workflows/ci.yml`
+- **Test users:** authenticated fixtures are created via the **Supabase admin auth API using the service-role key**. This task does **not** depend on T10 — app-layer signup does not exist yet and is not required. Users A and B are created, used and torn down by the suite itself.
+- **The failure-mode rule (new in v2.1).** After T03, an `anon` query against a service-role-only table fails with a **privilege error**, not an empty result set. A test that catches broadly and asserts "no rows" therefore **passes for the wrong reason** — and would keep passing on the day someone adds a permissive policy to a table that still lacks a grant, then stop protecting anything the day someone adds the grant. Each assertion must therefore state *which mechanism* is expected to do the work:
+  - **Service-role-only tables → assert a privilege/permission error.** An empty result set is a **failure** of the test, because it means a grant exists that should not.
+  - **Policy-governed tables → assert the query succeeds and returns correctly filtered rows.** A privilege error is a **failure** of the test, because it means the policy is inert for want of a grant.
+  - **Public reference tables → assert the query succeeds and returns only the allowed (active) rows.** Both a privilege error and the presence of an inactive row are failures.
 - **Acceptance criteria:**
-  - Test suite connects with the **anon key only** and asserts: zero rows readable from `deals`, `retailer_products`, `marketplace_products`, `product_matches`, `fee_schedules`, `api_usage_log`, `ingestion_runs`, `app_events`, `stripe_webhook_events`.
-  - As authenticated user A: can read own `profiles`, `credit_ledger`, `deal_unlocks`, `purchase_records`; **cannot** read user B's rows for any of them.
-  - Cannot UPDATE own `credit_balance` directly.
-  - Cannot INSERT into `credit_ledger`.
-  - `credit_packs` and active `credit_pack_prices` are readable according to policy; inactive prices/packs are not. Public country/currency/marketplace data exposes only active rows.
+  - With the **anon key only**, a **privilege error** is returned for: `deals`, `retailer_products`, `marketplace_products`, `product_matches`, `fee_schedules`, `tax_schedules`, `marketplaces`, `credit_purchases`, `api_usage_log`, `ingestion_runs`, `app_events`, `stripe_webhook_events`.
+  - With the anon key, `countries`, `currencies`, `markets`, `credit_packs` and active `credit_pack_prices` **succeed** and return **only active/live rows** — inactive rows are absent, and their absence is asserted against a seeded inactive fixture row, not merely assumed.
+  - As authenticated user A, queries against `profiles`, `credit_ledger`, `deal_unlocks`, `watchlist_items`, `purchase_records`, `barcode_lookups` **succeed** and return only A's rows. User B's seeded rows are absent. A privilege error on any of these fails the suite.
+  - User A cannot UPDATE own `credit_balance` directly — assert the specific rejection, not just an unchanged value.
+  - User A cannot INSERT into `credit_ledger` — assert a privilege or policy rejection.
+  - User A cannot call `spend_credits` or `grant_credits` (privilege error), duplicating T07's check at the integration layer.
+  - **Every table in the schema appears in exactly one of the three categories above.** The suite enumerates tables from the live catalogue (`information_schema`) and **fails if a table exists that no assertion covers** — otherwise the suite silently stops protecting each new table added between here and T44.
   - The suite is a **CI blocker**.
-- **Testing requirements:** This task *is* the test. It must run against a seeded ephemeral database in CI and be re-run after every future schema or policy change.
+- **Testing requirements:** This task *is* the test. It must run against a seeded ephemeral database in CI and be re-run after every future schema, grant or policy change. Include one deliberately inverted assertion during review — grant `SELECT` on `deals` to `anon` in a scratch branch and confirm the suite goes red — to prove the tests detect a real leak rather than merely passing.
 - **Priority:** P0
 
 ---
@@ -930,36 +1049,38 @@
 
 ---
 
-# FIRST 5 TASKS TO EXECUTE
+# NEXT 5 TASKS TO EXECUTE
+
+**Completed:** T01 (repo, CI, deploy) · T02 (Supabase, clients, migrations) · T03 (11 core tables, 9 enums, RLS enabled, privileges normalised — ADR-004).
 
 Give these to coding agents in this exact order. Do not start one until the previous task's acceptance criteria are verified.
 
-### 1. T01 — Repository, tooling, CI and first deploy
-**Agent:** Backend Engineer · **Depends on:** nothing  
-Create the Next.js/TypeScript/Tailwind skeleton, exact folder rules, validated env configuration, CI, Vercel deploy and preview flow.  
-*Why first:* every later change needs a green build, tests and rollback path.
-
-### 2. T02 — Supabase project, migrations harness and typed clients
-**Agent:** Database Engineer · **Depends on:** T01  
-Create the migration workflow and three correctly scoped Supabase clients with a server-only service-role boundary.  
-*Why second:* security boundaries must exist before data does.
-
-### 3. T03 — Global reference data, identity and catalogue schema
-**Agent:** Database Engineer · **Depends on:** T02  
-Create `countries`, `currencies`, `marketplaces`, `markets`, `tax_schedules`, `fee_schedules`, `profiles`, `retailers`, `retailer_products`, `marketplace_products`, `product_matches`. Use explicit currencies and canonical GTIN-14.  
-*Why third:* this is the task that prevents the whole application becoming UK/Amazon-hardcoded later.
-
-### 4. T04 — Market-scoped deals and user activity schema
+### 1. T04 — Market-scoped deals and user activity schema
 **Agent:** Database Engineer · **Depends on:** T03  
-Create the central `deals` model plus unlock/watchlist/purchase/barcode records, all market- and currency-aware.  
-*Why fourth:* feed isolation, pricing snapshots and future marketplace support depend on getting the read model right now.
+Create the central `deals` model plus unlock/watchlist/purchase/barcode records, all market- and currency-aware, with declarative cross-market consistency enforcement and the full column set enumerated in the task.  
+*Why first:* feed isolation, pricing snapshots and future marketplace support depend on getting the read model right now — and a cross-market deal is a user in one country seeing another country's price.
 
-### 5. T05 — Credits, per-currency billing and operational logs
+### 2. T05 — Credits, per-currency billing and operational logs
 **Agent:** Database Engineer · **Depends on:** T03  
 Create the append-only ledger, currency-neutral packs, per-currency pack prices, webhook events and market/provider operational logs.  
-*Why fifth:* this makes credits global without making every unlock price country-specific.
+*Why second:* this makes credits global without making every unlock price country-specific.
 
-**After these five:** T06 (RLS) → T07 (atomic credit RPCs) → T08 (global seed + one launch market) → T09 (RLS QA) → T10 (auth/onboarding) → T11 (security review).  
+### 3. T05A — Temporal integrity constraints on versioned schedules
+**Agent:** Database Engineer · **Depends on:** T03 · **Blocks:** T08  
+Exclusion constraints preventing overlapping effective ranges on `tax_schedules` (per country) and `fee_schedules` (per marketplace), with `[)` semantics and correct open-ended handling.  
+*Why third:* it must exist before T08 seeds a single schedule row, and it permanently removes a class of silent, market-wide wrongness (risks #2 and #3).
+
+### 4. T06 — RLS policies, SQL grants and append-only enforcement
+**Agent:** Database Engineer · **Depends on:** T03, T04, T05, T05A  
+Every policy paired with its minimum matching grant, every grant paired with its policy, service-role-only tables explicitly granted nothing, ledger immutability enforced by trigger.  
+*Why fourth:* after T03's normalisation, a policy without a grant is inert and a grant without a policy is a leak. This is the task where that correspondence is established for the whole schema.
+
+### 5. T07 — Atomic credit RPCs (`spend_credits`, `grant_credits`)
+**Agent:** Database Engineer · **Depends on:** T05, T06  
+Race-free, idempotent, `SECURITY DEFINER`, with `EXECUTE` revoked from `PUBLIC`/`anon`/`authenticated` and granted only to `service_role`.  
+*Why fifth:* every later money path depends on this being the only way credits move.
+
+**After these five:** T08 (global seed + one launch market) → T09 (RLS/privilege QA) → T10 (auth/onboarding) → T11 (security review).  
 Do not begin the deal engine until T11 has no open P0 findings.
 ---
 
@@ -967,7 +1088,7 @@ Do not begin the deal engine until T11 has no open P0 findings.
 
 | Phase | Tasks | Priority |
 |---|---|---|
-| 1. Foundation | T01–T11 | P0 |
+| 1. Foundation | T01–T11 (incl. T05A) | P0 |
 | 2. Deal engine | T12–T20 | P0 |
 | 3. Core APIs | T21–T27 | P0 |
 | 4. Frontend | T28–T33 | P0 |

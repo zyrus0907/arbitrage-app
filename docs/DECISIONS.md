@@ -312,3 +312,156 @@ the trigger ran and that `anon` genuinely held no `EXECUTE` at the time. The
 any later function follows the same rule. Forgetting produces a loud
 `permission denied for function` on first call, locally and remotely alike,
 rather than a difference between environments discovered in production.
+
+## ADR-004 — Database privilege posture: default-deny at two layers
+ 
+**Status:** Accepted · **Date:** 2026-08-10 · **Arose from:** T03 · **Supersedes:** nothing
+ 
+### Context
+ 
+T03 created 11 tables with RLS enabled and zero policies. During implementation we also normalised the underlying SQL privileges, which Supabase and Postgres would otherwise grant liberally by default. The resulting posture is:
+ 
+- `anon` and `authenticated`: **no table privileges**
+- `service_role`: **table DML only** (no DDL)
+- Functions: **owner-only** by default
+- Local and remote privilege state normalised and verified to match
+This is a stronger posture than "RLS on, no policies," and it changes what a policy *means*. RLS filters rows **within privileges already held**. With no grant, a policy is inert — the query fails with a privilege error before RLS is ever consulted.
+ 
+### Decision
+ 
+Default-deny is enforced at **two independent layers — SQL privileges and RLS policies — and access requires both**.
+ 
+1. Every migration creating a table, function, view or sequence **states its privilege posture explicitly** in a header comment. Silence is not a posture.
+2. New objects receive **no** `anon` or `authenticated` privileges unless a later task grants them deliberately.
+3. Any privilege Postgres or Supabase grants by default is **revoked in the same migration** that creates the object — including on sequences, which are easy to miss.
+4. **Every policy has a matching minimum grant; every grant has a matching policy.** A mismatch in either direction is a defect: an inert policy, or an ungoverned privilege.
+5. Grants are **minimum-necessary and per-operation**. Never `GRANT ALL`.
+### Consequences
+ 
+- **T06** must issue explicit `GRANT SELECT` (and per-operation grants) alongside every policy. Without this the policies are decoration and the app cannot read its own data.
+- **T07** must `REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated` and `GRANT EXECUTE … TO service_role`, in the same migration as the function body, and again after every `CREATE OR REPLACE`. A `SECURITY DEFINER` credit function with a default `PUBLIC` execute grant is a direct route to minting credits.
+- **T04, T05, T05A** must state their posture and grant nothing to `anon`/`authenticated`.
+- **T09's tests must distinguish failure modes.** A test asserting "zero rows" passes for the wrong reason when the real cause is a missing grant — and would keep passing until the day a grant is added, at which point it silently stops protecting anything. Assertions must specify whether a privilege error or RLS filtering is expected. See ADR-004 consequences in `TASKS.md` T09.
+- Added as global rule 8 in `TASKS.md` and to the migration checklist in `docs/RUNBOOK.md`.
+- Ongoing cost: roughly two extra lines per migration, and one review question per PR. Accepted.
+### Alternatives considered
+ 
+- *Rely on RLS alone with Supabase's default grants.* Rejected: it makes the anon key's reach depend on a default we do not control, and a policy authoring mistake becomes an immediate data leak rather than a caught error.
+- *Grant broadly to `authenticated` and rely on policies to filter.* Rejected: one missing policy then exposes a whole table, and the paid product (`deals`) is exactly the thing that would leak.
+---
+ 
+## ADR-005 — `fx_rates` deferred to Phase 3
+ 
+**Status:** Accepted · **Date:** 2026-08-10 · **Arose from:** T03 planning gap review
+ 
+### Context
+ 
+`ARCHITECTURE.md` §2.2 originally specified `fx_rates` as "Phase 3 use, **seeded now** for admin reporting only." No task in `TASKS.md` owned creating it — the gap that prompted this review.
+ 
+On inspection the document contradicted itself. §2.2 said seed it now; risk #4 says "**no FX in MVP at all**"; §7.6 constrains deals to a single currency; §0.1 assumption 7 makes cross-border Phase 3; and `PRODUCT_SPEC.md` AC2.7 forbids the user from selecting a combination that would require conversion. "Admin reporting" is not a feature in `PRODUCT_SPEC.md`, and the admin console (T33) has no cross-currency view.
+ 
+### Decision
+ 
+**`fx_rates` is not created in the MVP.** It arrives in Phase 3, at the first genuine cross-border or multi-currency reporting requirement, and not before. `ARCHITECTURE.md` §2.2 is amended to match. `TASKS.md` T08 states it as explicitly out of scope.
+ 
+### Consequences
+ 
+- One extra migration in Phase 3. Trivial.
+- Removes a live footgun: an empty table with no consumer is an invitation for a later service to join it and convert a currency, and **a silent FX error looks exactly like a great deal**. That is risk #4 in the architecture's own words.
+- Until Phase 3, no table, no FK, no reference under `src/services/`.
+### Revisit condition
+ 
+The first of: cross-border sourcing (§7.7), multi-currency admin reporting becoming a stated requirement in `PRODUCT_SPEC.md`, or a second live market whose costs need consolidating into one reporting currency.
+ 
+---
+ 
+## ADR-006 — Temporal exclusion constraints on versioned schedules
+ 
+**Status:** Accepted · **Date:** 2026-08-10 · **Arose from:** T03 planning gap review · **Implemented by:** T05A
+ 
+### Context
+ 
+`tax_schedules` and `fee_schedules` are versioned by an `effective_from`/`effective_to` pair. T03 created both without any constraint preventing overlapping ranges. The original plan left non-overlapping ranges as a T08 seeding discipline.
+ 
+`MarketContext` (T13) resolves "the schedule effective for this key on this date." With two overlapping rows, Postgres returns whichever row the plan happens to reach first — stable enough to pass tests, unstable enough to change after an unrelated `VACUUM`.
+ 
+Seeding discipline cannot hold this, because T08 is not the only writer: T33 gives the admin console versioned fee-schedule editing (AC16.4). A human will eventually create an overlap by hand, and the failure is silent.
+ 
+### Decision
+ 
+Enforce non-overlap **in the database**, on both tables, via `EXCLUDE` constraints (`btree_gist`, enabled only if not already present).
+ 
+- **Half-open `[)` ranges.** A version ending at T and its successor starting at T are adjacent, not overlapping, and both are accepted — this is the normal shape of a version bump and must not be rejected.
+- **`effective_to IS NULL` means open-ended/current and participates in overlap detection** as an unbounded upper edge. Two open-ended rows for the same key are rejected. A NULL that silently dropped out of the constraint would defeat the entire purpose, because the current row is precisely the one most likely to be NULL-terminated.
+- Keyed by `country_code` for `tax_schedules`, `marketplace_id` for `fee_schedules`. Overlaps across different keys remain valid.
+- `CHECK (effective_to IS NULL OR effective_to > effective_from)`.
+**Representation choice:** record in the T05A PR whether `tstzrange(effective_from, effective_to, '[)')` is used inline or a generated range column is added. Both are acceptable; the choice must be consistent across the two tables.
+ 
+### Consequences
+ 
+- **T05A blocks T08.** The constraint must exist before any schedule row is seeded, or the seed can create the defect and commit it as fixture data.
+- Failure mode moves from silent and market-wide (risks #2 and #3, "trust gone market-wide") to a loud write rejection at the moment a human makes the mistake.
+- The admin console's schedule editor (T33) will surface constraint violations as user-facing errors. It must handle them with a clear message rather than a 500.
+- Recorded in `ARCHITECTURE.md` §2.2 as a stated convention, not only here, because T13 and T33 both depend on the semantics.
+---
+ 
+## ADR-007 — Deal market-consistency enforced declaratively
+ 
+**Status:** Accepted · **Date:** 2026-08-10 · **Arose from:** T03 planning gap review · **Implemented by:** T04
+ 
+### Context
+ 
+`deals` carries `market_id`, `retailer_product_id` and `marketplace_product_id`. Nothing prevented a row where these disagree — a deal in market A referencing a retailer product belonging to market B, or a marketplace product from a marketplace other than the one market A resolves to.
+ 
+`ARCHITECTURE.md` §15 step 11 anticipates this ("cross-market deal id is rejected") but no constraint existed. §2.3 states the consequence plainly: a query that forgets market scoping surfaces as "a user in Germany seeing a Tesco price in pounds."
+ 
+The T04 test criterion that was supposed to cover this — "two markets can hold independent deals for the same canonical product pair where the marketplace differs" — was incoherent: if the marketplace differs, `marketplace_product_id` differs, so it is not the same pair; and a retailer product cannot belong to two markets because its retailer has exactly one `market_id`. It tested nothing.
+ 
+### Decision
+ 
+Enforce in the database, on insert **and** update:
+ 
+1. `deals.market_id` equals the market of `retailer_product_id`'s retailer.
+2. `deals.marketplace_product_id`'s `marketplace_id` equals the `marketplace_id` that `deals.market_id` resolves to.
+**Preferred mechanism: denormalise the parent keys onto `deals` and enforce with composite foreign keys.** A `CONSTRAINT TRIGGER` is acceptable if the engineer judges it cleaner, and the choice is recorded in the T04 PR — but declarative constraints cannot be bypassed by `COPY` or a service-role bulk upsert, and the T19 ingestion pipeline does bulk upserts.
+ 
+A violation must **fail the write**. A cross-market deal that merely fails to appear in a feed is not acceptable.
+ 
+### Consequences
+ 
+- Small denormalisation on `deals` if option (a) is taken — accepted, since the columns are immutable for the row's lifetime.
+- T04's test criterion replaced with genuine cross-market rejection tests covering insert, update and bulk write.
+- T19's pipeline gets a hard failure rather than a silent bad row, consistent with the "partial failure is normal, silent wrongness is not" principle in §12.2.
+---
+ 
+## ADR-008 — Public reference-data exposure surface
+ 
+**Status:** Accepted · **Date:** 2026-08-10 · **Arose from:** T03 privilege review · **Implemented by:** T06
+ 
+### Context
+ 
+`ARCHITECTURE.md` §6.3 originally listed `markets`, `marketplaces`, `countries` and `currencies` as public-read, with the rationale "the client needs to render a currency and a market name."
+ 
+`marketplaces` carries `adapter_key` and `capabilities` — integration internals that describe which provider serves a marketplace and what data it can supply. The stated rationale does not require it: the feed is market-scoped server-side, and rendering a currency and a market name is served by `currencies` and `markets` alone. No MVP client surface reads it.
+ 
+### Decision
+ 
+The public-read surface for `anon`/`authenticated` is exactly:
+ 
+| Table | Exposure |
+|---|---|
+| `countries` | `SELECT`, active rows only |
+| `currencies` | `SELECT`, active rows only |
+| `markets` | `SELECT`, active/live rows only |
+| `credit_packs` | `SELECT`, active rows only |
+| `credit_pack_prices` | `SELECT`, active rows only |
+ 
+**`marketplaces` is removed from public read** and becomes service-role only. Everything not in this table is service-role only.
+ 
+If a client need for marketplace data emerges, expose a **view** with the specific columns required — do not grant the table.
+ 
+### Consequences
+ 
+- `ARCHITECTURE.md` §6.3 amended; this is the one place where v2.1 planning **narrows** a previously documented decision, and it is recorded here rather than changed silently.
+- T06 grants and T09 assertions both updated: `marketplaces` moves to the "privilege error expected" category.
+- If a later frontend task needs `capabilities` client-side, that is a design smell — capability-aware scoring (§8.7) happens server-side and ships its results in the redacted deal payload.

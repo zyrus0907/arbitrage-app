@@ -376,7 +376,7 @@ Written as verifiable conditions. Given / When / Then where behavioural.
 
 ### F6 — Profit engine
 
-- **AC6.1** The output is an itemised breakdown, never a single figure. Minimum lines: buy price, VAT treatment, referral fee, fulfilment fee, storage, prep, inbound shipping, returns allowance, net profit, ROI, margin.
+- **AC6.1** The output is an itemised breakdown, never a single figure. Minimum lines: buy price, tax treatment (labelled per the resolved market's regime — VAT, GST, sales tax or none), referral fee, fulfilment fee, storage, prep, inbound shipping, returns allowance, net profit, ROI, margin.
 - **AC6.2** The pricing engine supports the tax regime selected by the resolved MarketContext (VAT, GST, sales tax or none). It must distinguish registered vs non-registered treatment where the regime supports it, and must not hard-code country-specific rates.
 - **AC6.3** Where the applicable tax regime permits input-tax recovery, the UI displays any evidence/invoice caveat required for that treatment. Where tax treatment is uncertain, the deal is flagged rather than guessed.
 - **AC6.4** Assumed sell price is the **lower** of the current featured-offer/Buy Box price and its 90-day average where price-history capability is available. Never the peak, never the maximum.

@@ -333,3 +333,76 @@ built output:
 ```bash
 grep -rl "SERVICE_ROLE" .next/static | wc -l   # must be 0
 ```
+
+## Migration checklist — privilege posture
+ 
+Established in T03 and binding on every migration from T04 onward (ADR-004). **Access requires both a SQL privilege and an RLS policy. Neither works alone:** RLS filters rows *within* privileges already held, so a policy without a grant is inert, and a grant without a policy is an ungoverned privilege.
+ 
+Baseline established in T03:
+ 
+- `anon`, `authenticated` → **no table privileges**
+- `service_role` → **table DML only** (no DDL)
+- functions → **owner-only**
+### Before opening the PR, for every object the migration creates
+ 
+**Tables**
+- [ ] Header comment states the privilege posture explicitly — which roles get what, and why. Silence is not a posture.
+- [ ] No `GRANT` to `anon` or `authenticated` unless this migration is the task that deliberately opens access (T06 for the schema's public-read and user-owned tables).
+- [ ] Any Postgres or Supabase **default grant is revoked in this same migration**.
+- [ ] `ALTER TABLE … ENABLE ROW LEVEL SECURITY` is present.
+- [ ] If a policy is added, a matching **minimum, per-operation** grant is added with it — `SELECT` where only reads are needed, never `GRANT ALL`.
+- [ ] If a grant is added, a matching policy is added with it.
+- [ ] Service-role-only tables state "no anon/authenticated grants" explicitly rather than leaving it implicit.
+**Sequences**
+- [ ] Default grants on sequences created alongside tables are revoked. Easy to miss; `GRANT INSERT` without sequence access fails confusingly, and sequence access without `INSERT` is a needless privilege.
+**Functions**
+- [ ] `REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated;`
+- [ ] `GRANT EXECUTE ON FUNCTION … TO <specific role>;` — for the credit RPCs this is `service_role` and nothing else.
+- [ ] Both statements live in the **same migration file as the function body**, and are repeated after **every** `CREATE OR REPLACE`. Postgres grants `EXECUTE` to `PUBLIC` on creation by default, and a later "fix the RPC" migration that replaces the body without re-revoking silently reopens it.
+- [ ] `SECURITY DEFINER` functions also set `search_path` explicitly.
+**Views**
+- [ ] Posture stated. Note that a view runs with the privileges of its owner unless `security_invoker` is set — decide which is intended and say so.
+**Extensions**
+- [ ] If the migration creates an extension, note that its objects are not granted to `anon` or `authenticated`.
+### After applying remotely
+ 
+- [ ] Regenerate `src/types/database.ts` against the **remote** database and commit it. Local-only generation does not satisfy this.
+- [ ] Re-run the T09 RLS/privilege verification suite. It enumerates tables from the live catalogue and fails on any table no assertion covers, so a new table will turn it red until an assertion is added — that is intended, not a nuisance.
+- [ ] Confirm local and remote migration history match.
+### Verifying the posture by hand
+ 
+Useful when a PR's claims need checking rather than trusting:
+ 
+```sql
+-- Table and column privileges held by the client-facing roles
+select table_name, privilege_type, grantee
+from information_schema.role_table_grants
+where grantee in ('anon','authenticated')
+order by table_name, grantee, privilege_type;
+ 
+-- Function execute privileges
+select p.proname, p.prosecdef as security_definer, a.grantee, a.privilege_type
+from information_schema.role_routine_grants a
+join pg_proc p on p.proname = a.routine_name
+where a.grantee in ('public','anon','authenticated');
+ 
+-- Tables with RLS enabled but no policies (expected: service-role-only tables)
+select c.relname
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'public' and c.relrowsecurity
+  and not exists (select 1 from pg_policy p where p.polrelid = c.oid);
+ 
+-- Policies with no corresponding grant, and grants with no policy: cross-check
+-- the two queries above against the policy list in the PR description.
+```
+ 
+### The failure modes this prevents
+ 
+| Symptom | Cause | Where it bites |
+|---|---|---|
+| Policy written, app still cannot read | Grant missing — policy is inert | T06, and any later feature task |
+| Table readable by anon that should not be | Grant present, policy missing or permissive | Redaction bypass — the paid product given away |
+| RLS test passes but protects nothing | Test asserted "zero rows" when the real cause was a privilege error | T09 — assertions must name the expected mechanism |
+| Credits mintable from the client | `CREATE OR REPLACE` on a `SECURITY DEFINER` function without re-revoking `PUBLIC` | T07, and any later RPC change |
+ 
