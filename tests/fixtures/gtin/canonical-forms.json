@@ -1,0 +1,31 @@
+{
+  "description": [
+    "Canonical GTIN-14 fixtures (ARCHITECTURE.md §2.3).",
+    "A UPC-12 sold in one country and an EAN-13 sold in another identify the",
+    "same product. The canonical form is the code zero-padded to 14 digits, and",
+    "that is what retailer_products.gtin14 and marketplace_products.gtins store.",
+    "These fixtures define the expected mapping. The normalisation function that",
+    "produces it is T18 (src/services/matching/gtin.ts) and is deliberately not",
+    "implemented here — this file is the contract it will be tested against."
+  ],
+  "products": [
+    {
+      "label": "same product listed as UPC-12 in one market and EAN-13 in another",
+      "gtin14": "00012345678905",
+      "forms": [
+        { "raw": "012345678905", "format": "upc_a" },
+        { "raw": "0012345678905", "format": "ean_13" }
+      ]
+    },
+    {
+      "label": "EAN-13 with no shorter form",
+      "gtin14": "04901234567894",
+      "forms": [{ "raw": "4901234567894", "format": "ean_13" }]
+    },
+    {
+      "label": "EAN-8",
+      "gtin14": "00000096385074",
+      "forms": [{ "raw": "96385074", "format": "ean_8" }]
+    }
+  ]
+}

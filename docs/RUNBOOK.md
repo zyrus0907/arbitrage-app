@@ -149,6 +149,21 @@ local state. Run it before every push.
 
 Local Studio is at <http://localhost:54323>.
 
+### Database tests
+
+Schema properties that the application cannot assert — constraints, cascade and
+restrict behaviour, indexes, triggers, RLS default deny — are pgTAP tests in
+`supabase/tests/database/`:
+
+```bash
+npm run db:test
+```
+
+Run it **after** `db:reset`, because it tests whatever the local database
+currently is. Each file opens a transaction, creates the `pgtap` extension
+inside it and rolls back, so no migration ever installs a test extension into
+the hosted project.
+
 > Without Docker you cannot run the local stack. You can still push migrations
 > to the development project (§6) and generate types (§7); you simply lose the
 > ability to test a migration before it lands. In that situation, treat the
@@ -284,6 +299,7 @@ is the development project first — `npx supabase projects list`.
 ```
 [ ] npm run db:new -- <name>          write forward SQL
 [ ] npm run db:reset                  applies cleanly from empty (Docker)
+[ ] npm run db:test                   pgTAP schema tests pass
 [ ] npm run db:list                   no unexpected divergence
 [ ] npm run db:push                   applied to development
 [ ] npm run db:types                  regenerate committed types

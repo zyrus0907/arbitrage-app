@@ -7,7 +7,16 @@ import typescript from 'eslint-config-next/typescript';
  */
 const config = [
   {
-    ignores: ['.next/**', 'node_modules/**', 'next-env.d.ts', 'coverage/**'],
+    // `supabase/.temp/` is CLI-generated, git-ignored, per-machine state. The
+    // local stack writes a bundled edge-runtime entrypoint there on
+    // `db:start`/`db:reset`, and linting a generated bundle is noise.
+    ignores: [
+      '.next/**',
+      'node_modules/**',
+      'next-env.d.ts',
+      'coverage/**',
+      'supabase/.temp/**',
+    ],
   },
   ...coreWebVitals,
   ...typescript,
