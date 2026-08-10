@@ -652,3 +652,57 @@ Two reasons cost one enum value. One reason costs the ability to answer "are we 
 - **T10** owns account-deletion pseudonymisation and must record it as its own ADR. Until it lands, deleting a user with ledger rows fails with `23503` — including via `auth.users`, because `profiles` cascades from it.
 - **T35** deducts with reason `chargeback`, and its per-currency reconciliation can now separate payment reversals from product refunds without leaving the database.
 - **`PRODUCT_SPEC.md`** gains AC1.6 (financial retention) and sharpened AC15.4 / AC17.5 / AC21.4.
+
+---
+
+## ADR-0011 — Schema C: four storage-level invariants, and four ambiguities resolved
+
+**Status:** Accepted · T05 · 2026-08-10 · implements ADR-0010 · refines `ARCHITECTURE.md` §2.3 in four places where the document was silent or self-contradictory · touches no T01–T04 outcome
+
+**Context.** ADR-0010 settled T05's six open questions before the task began, and T05 implemented them as written: the split `refund`/`chargeback` reasons, `ON DELETE RESTRICT` on both financial tables, the double-enforced ledger immutability, the nullable `stripe_price_id`, the restricted-not-immutable webhook table, and the two `service_role` narrowings. Writing the SQL surfaced two further classes of thing that ADR-0010 could not have covered, because both only appear once the columns are being typed:
+
+1. **Four invariants the documents state in prose but no constraint would have enforced.** Each is a financial defect of the silent kind `RUNBOOK.md`'s financial checklist exists to prevent — nothing fails at write time, and the disagreement surfaces in a reconciliation months later.
+2. **Four points where `ARCHITECTURE.md` §2.3's column list and another section of the same document could not both be satisfied.** Each needed a decision rather than a reading.
+
+**Decisions — part 1: four invariants enforced at the storage layer.**
+
+**1. `refund` must be positive and `chargeback` must be negative** — `CHECK ((reason <> 'refund' OR delta > 0) AND (reason <> 'chargeback' OR delta < 0))`.
+
+ADR-0010 decision 1, `ARCHITECTURE.md` §2.3's reason table, AC15.4 and AC17.5 all fix these two directions. Without the constraint the direction is a convention held by whichever service writes the row, and a reversed sign produces a `refund` row that means the opposite of what every reader of the "credit refunds issued" trust metric (`PRODUCT_SPEC.md` §9.4) will assume. The remaining six reasons are deliberately unconstrained: `admin_adjust` is signed by definition — which is exactly why the sign alone cannot identify a reversal after the fact — and a grant or promo that later needs reversing is an `admin_adjust`, not a backwards `refund`.
+
+**2. `credit_pack_prices.stripe_price_id` is `UNIQUE`.** Two price rows pointing at one Stripe Price means one Stripe object sells two different credit quantities, and T35's per-currency reconciliation cannot say which sale it is looking at. Multiple NULLs do not conflict in a unique index, so this constrains nothing until T34 populates the column — which is precisely the window (T08 onward) in which it must not get in the way.
+
+**3. A purchase's currency must agree with its price row's currency** — composite foreign key `(credit_pack_price_id, currency) → credit_pack_prices (id, currency)`, requiring the referenceable `UNIQUE (id, currency)` on the price table.
+
+This is ADR-0008's technique applied to money rather than to markets, for the same reason: §11.4 reconciles `credit_purchases` against Stripe **per currency**, and a USD sale recorded against the GBP price row is a currency-blind error that a currency-blind total would hide. `MATCH SIMPLE` means a NULL `credit_pack_price_id` skips the check entirely, which is correct — an admin grant or a retired price has nothing to agree with. The composite key also carries the plain reference, so no second single-column FK exists to drift from it.
+
+**4. `credit_ledger` rejects `TRUNCATE`** — a `BEFORE TRUNCATE ... FOR EACH STATEMENT` trigger sharing the row trigger's function.
+
+`TRUNCATE` is neither `UPDATE` nor `DELETE`, and a row-level trigger never fires for it. ADR-0010's argument for the trigger layer is that a revoke says nothing about the migration owner, a support script or a dashboard session; that argument applies unchanged to `truncate credit_ledger`, which would empty the source of truth for money without firing anything. `service_role` cannot reach it — it holds no `TRUNCATE` anywhere — so this closes the gap for exactly the privileged roles the row trigger already exists to catch. The function raises unconditionally and never references `OLD` or `NEW`, so one function serves both triggers.
+
+**Decisions — part 2: four ambiguities resolved.**
+
+**5. `credit_purchases.stripe_checkout_session_id` is nullable and `UNIQUE`.** §2.3 lists it `UNIQUE` with no nullability marker, while §9.2's purchase flow creates the `credit_purchases(pending)` row **before** the Checkout Session exists. `NOT NULL` would make the documented flow impossible. Unique still does the work that matters — one session can never fulfil two purchases — and the same shape already applies to `stripe_payment_intent_id`, which §2.3 does mark nullable for the same reason one step later in the flow.
+
+**6. `app_events.user_id` is nullable with `ON DELETE SET NULL`.** §11.5 enumerates what cascades from `auth.users` — profile, unlocks, watchlist, purchase records, barcode lookups — and `app_events` is not on that list, so the behaviour had to be chosen rather than inherited. The funnel question (§9.3) is a **count**, not a person: nulling the actor de-identifies the row completely while preserving the count, and it can never block the deletion AC1.5 requires. This is ADR-0009's `published_by`/`retired_by` precedent applied to analytics. Nullable also because an event can precede any account at all — signup is itself an event.
+
+**7. `updated_at` goes only on the three tables that are genuinely edited** — `credit_packs`, `credit_pack_prices`, `credit_purchases`. ADR-0005 decision 5 put `updated_at` on every Schema A table because reference data is edited and catalogue rows are re-upserted. Applied literally to Schema C it contradicts two of this task's guarantees: an append-only table cannot carry a "when was this last changed" column, and on `stripe_webhook_events` it would become a fourth column T06's restricted-UPDATE trigger had to carve an exception for, weakening the rule to "identity frozen, plus whatever else we added". The ledger, the webhook table and the three operational logs therefore carry exactly §2.3's column sets; their own timestamp — `created_at`, `received_at`, `started_at` — is the record of when they happened.
+
+**8. `api_usage_log.marketplace_id` is nullable, `ON DELETE RESTRICT`.** §2.3 does not say. Not every provider call is marketplace-scoped — a retailer feed fetch or a payment-processor call has none — and `NOT NULL` would mean those calls simply go unlogged, which is the opposite of what a cost log is for (§10.2, risk #6). `RESTRICT` rather than `SET NULL` because a marketplace is configuration that is effectively never deleted, and cost history that silently loses its attribution stops answering the question it exists to answer.
+
+**Why these are constraints rather than conventions.** Every one of the four in part 1 is already written down somewhere. The reason to spend a constraint on a documented rule is the failure mode: financial defects are silent. A wrong fee is visible to the user and reported within a day; a `refund` row with the wrong sign, a duplicated Stripe Price or a currency-mismatched purchase produces no error, no alert and no symptom until a reconciliation disagrees months later — by which point the evidence needed to work out what happened is the evidence that is wrong. `RUNBOOK.md`'s financial checklist exists because of that asymmetry, and these four are its items 1, 4 and 5 applied to the specific columns T05 creates.
+
+**Alternatives considered.**
+
+- **Enforcing the purchase snapshot columns (`credits`, `amount_minor`, `currency`) with a restricted-UPDATE trigger.** Rejected. `RUNBOOK.md` financial checklist §4 sets the standard as "immutable in intent and **documented as such**", T05's acceptance criteria ask for no trigger, and checklist §1 warns that two mechanisms with one purpose means either can be dropped with no test going red. The three columns carry explicit `Immutable snapshot` comments and `schema_c.test.sql` asserts all three comments exist, so the intent is machine-checked even though the value is not.
+- **Constraining the sign of all eight ledger reasons.** Rejected. Only `refund` and `chargeback` have a direction fixed by the documents; inventing one for `promo` or `signup_grant` would be this task deciding a product question it has no basis to decide, and the first legitimate reversal would need a migration.
+- **`ON DELETE CASCADE` for `app_events.user_id`.** Rejected: it destroys funnel history as a side effect of an unrelated privacy operation, when nulling one column satisfies the same privacy requirement.
+
+**Consequences.**
+
+- **T07** is unaffected by decisions 1–4 in one direction and constrained in another: `grant_credits` writes `refund` rows positive and `chargeback` rows negative or the insert fails, which is the intended shape. ADR-0010's existing constraint stands — the idempotency check must be `ON CONFLICT DO NOTHING` plus a read, never `DO UPDATE`, and `schema_c.test.sql` now proves the trigger raises on the upsert path rather than leaving it as prose.
+- **T08** is unaffected. Seeding `stripe_price_id` as `NULL` on every pack price remains valid and now has two coexisting NULL rows asserted as a test, so the unique constraint cannot be mistaken for a reason to invent a placeholder.
+- **T34** must create one Stripe Price per pack price row. Reusing a Stripe Price id across two rows now fails at write time rather than at reconciliation.
+- **T35** may write `processed_at` and `error` on `stripe_webhook_events` exactly as designed — T05 added no trigger there, and the test suite asserts the table has zero triggers so T06's restricted-UPDATE trigger arrives as the only one.
+- **T10** inherits the retention consequence unchanged from ADR-0010, plus one clarification: `app_events` does **not** block account deletion and de-identifies itself, so the pseudonymisation mechanism T10 designs has to cover `credit_ledger` and `credit_purchases` only.
+- **`ARCHITECTURE.md` §2.3** should be read with decisions 5–8 alongside it; the column lists there are otherwise silent on all four points.

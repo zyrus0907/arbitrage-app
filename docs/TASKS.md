@@ -4,7 +4,7 @@
 **Document owner:** Technical Project Manager
 **Version:** 2.3 — global-first, marketplace-agnostic, Amazon-first MVP
 **Source documents:** `ARCHITECTURE.md` v2.0 (technical contract) · `PRODUCT_SPEC.md` v2.0 (scope contract)
-**Status:** In execution. **T01–T04 complete.** Next task: T05.
+**Status:** In execution. **T01–T05 complete.** Next task: T05A.
 
 > **Execution scope:** Build a global-first core, but operate exactly one launch market during MVP. Amazon is the only marketplace integration in MVP. Country, currency, tax regime and marketplace must be data/configuration concepts, not hard-coded application assumptions.
 
@@ -238,7 +238,9 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
 
 ---
 
-## T05 — Schema C: credits, multi-currency billing and operational logs
+## ✅ T05 — Schema C: credits, multi-currency billing and operational logs
+
+> **Status: COMPLETE.**
 
 - **Goal:** Create the currency-neutral credit ledger, per-currency pack pricing, and market-aware operational logs — with ledger immutability and financial-record retention established here rather than deferred.
 - **Agent:** Database Engineer
@@ -318,6 +320,8 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
   - The privileges test asserts the **narrowed** per-table posture, not a blanket `service_role` DML grant — otherwise the revokes above regress silently.
   - Regenerate `src/types/database.ts` against the remote database and commit it.
 - **Priority:** P0
+- **Completion note:** Schema C (`20260810195812_schema_c.sql`) applied locally from a clean `db:reset` and pushed to the linked development project; local and remote migration history match, and `supabase db diff --linked` reports no schema changes. Eight tables added — `credit_packs`, `credit_pack_prices`, `credit_ledger`, `credit_purchases`, `stripe_webhook_events`, `api_usage_log`, `ingestion_runs`, `app_events` — bringing `public` to 24. Two new enum types (`credit_reason`, carrying `refund` and `chargeback` as separate reasons per ADR-0010, and `credit_purchase_status`); the existing twelve were inventoried first and none was near-duplicated. **`credit_ledger` is append-only at both layers and both are live in the same migration as the table:** a `BEFORE UPDATE OR DELETE` row trigger raising `0A000` (with a `BEFORE TRUNCATE` statement trigger closing the path no row trigger sees), *and* `service_role` holding `SELECT, INSERT` only. The tests exercise the trigger as the migration owner and the revoke as `service_role`, so a privilege failure and a trigger failure cannot be mistaken for each other. `stripe_webhook_events` is deliberately left mutable with `DELETE` revoked from `service_role` and **no trigger**, leaving T06's restricted-UPDATE trigger as the only one that will ever exist there. Both `service_role` narrowings verified on local and remote. Financial retention is `ON DELETE RESTRICT` on `credit_ledger.user_id` and `credit_purchases.user_id`, so deleting an account holding financial rows fails `23503` through `profiles` and through `auth.users` — the pseudonymisation that unblocks it remains T10's. `stripe_price_id` is nullable and no placeholder exists. RLS is enabled on all 24 tables with zero policies; `anon` and `authenticated` hold no privilege of any kind anywhere in `public`, verified on both environments. All eight required indexes exist, no sequence was created, and `app_events.properties` carries its no-PII rule as a column comment. `src/types/database.ts` regenerated from the remote and current. Test suite green: **366 pgTAP assertions** (152 new in `schema_c.test.sql`) plus 50 application tests, with typecheck, lint and build clean.
+- **Decisions recorded:** ADR-0011 (Schema C), implementing the ADR-0010 planning decisions. It records four invariants the documents stated in prose and no constraint would have caught — the `refund > 0` / `chargeback < 0` direction check, `UNIQUE` on `stripe_price_id`, a composite foreign key tying a purchase's currency to its price row's currency, and `TRUNCATE` protection on the ledger — and resolves four points where `ARCHITECTURE.md` §2.3 was silent or disagreed with another section: `stripe_checkout_session_id` nullable (§9.2 creates the row before the Checkout Session exists), `app_events.user_id` `ON DELETE SET NULL`, `updated_at` only on the three genuinely edited tables, and `api_usage_log.marketplace_id` nullable.
 
 ---
 

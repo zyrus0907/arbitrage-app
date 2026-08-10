@@ -111,8 +111,8 @@ select is(
   (select count(*)::int
      from pg_type t join pg_namespace n on n.oid = t.typnamespace
     where n.nspname = 'public' and t.typtype = 'e'),
-  12,
-  'twelve enum types exist: T03''s nine plus exactly three new ones');
+  14,
+  'fourteen enum types exist: T03''s nine, T04''s three and T05''s two');
 
 select is(
   (select string_agg(e.enumlabel, '|' order by e.enumsortorder)
@@ -1335,7 +1335,8 @@ select is(
      join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public'
       and p.proname not in ('set_updated_at', 'handle_new_user',
-                            'enforce_deal_lifecycle', '_deal_sql')),
+                            'enforce_deal_lifecycle', 'enforce_credit_ledger_append_only',
+                            '_deal_sql')),
   0,
   'Schema B added exactly one function, the lifecycle trigger function');
 

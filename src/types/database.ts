@@ -14,6 +14,102 @@ export type Database = {
   }
   public: {
     Tables: {
+      api_usage_log: {
+        Row: {
+          cost_minor_est: number | null
+          created_at: string
+          currency: string | null
+          endpoint: string
+          id: string
+          latency_ms: number | null
+          marketplace_id: string | null
+          provider: string
+          status: string
+          units_used: number
+        }
+        Insert: {
+          cost_minor_est?: number | null
+          created_at?: string
+          currency?: string | null
+          endpoint: string
+          id?: string
+          latency_ms?: number | null
+          marketplace_id?: string | null
+          provider: string
+          status: string
+          units_used?: number
+        }
+        Update: {
+          cost_minor_est?: number | null
+          created_at?: string
+          currency?: string | null
+          endpoint?: string
+          id?: string
+          latency_ms?: number | null
+          marketplace_id?: string | null
+          provider?: string
+          status?: string
+          units_used?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "api_usage_log_currency_fkey"
+            columns: ["currency"]
+            isOneToOne: false
+            referencedRelation: "currencies"
+            referencedColumns: ["code"]
+          },
+          {
+            foreignKeyName: "api_usage_log_marketplace_id_fkey"
+            columns: ["marketplace_id"]
+            isOneToOne: false
+            referencedRelation: "marketplaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      app_events: {
+        Row: {
+          created_at: string
+          event: string
+          id: string
+          market_id: string | null
+          properties: Json
+          user_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          event: string
+          id?: string
+          market_id?: string | null
+          properties?: Json
+          user_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          event?: string
+          id?: string
+          market_id?: string | null
+          properties?: Json
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "app_events_market_id_fkey"
+            columns: ["market_id"]
+            isOneToOne: false
+            referencedRelation: "markets"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "app_events_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       barcode_lookups: {
         Row: {
           barcode_raw: string
@@ -119,6 +215,208 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "currencies"
             referencedColumns: ["code"]
+          },
+        ]
+      }
+      credit_ledger: {
+        Row: {
+          balance_after: number
+          created_at: string
+          delta: number
+          id: string
+          idempotency_key: string
+          reason: Database["public"]["Enums"]["credit_reason"]
+          ref_id: string | null
+          ref_type: string | null
+          user_id: string
+        }
+        Insert: {
+          balance_after: number
+          created_at?: string
+          delta: number
+          id?: string
+          idempotency_key: string
+          reason: Database["public"]["Enums"]["credit_reason"]
+          ref_id?: string | null
+          ref_type?: string | null
+          user_id: string
+        }
+        Update: {
+          balance_after?: number
+          created_at?: string
+          delta?: number
+          id?: string
+          idempotency_key?: string
+          reason?: Database["public"]["Enums"]["credit_reason"]
+          ref_id?: string | null
+          ref_type?: string | null
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "credit_ledger_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      credit_pack_prices: {
+        Row: {
+          active: boolean
+          amount_minor: number
+          created_at: string
+          credit_pack_id: string
+          currency: string
+          id: string
+          stripe_price_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          amount_minor: number
+          created_at?: string
+          credit_pack_id: string
+          currency: string
+          id?: string
+          stripe_price_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          amount_minor?: number
+          created_at?: string
+          credit_pack_id?: string
+          currency?: string
+          id?: string
+          stripe_price_id?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "credit_pack_prices_credit_pack_id_fkey"
+            columns: ["credit_pack_id"]
+            isOneToOne: false
+            referencedRelation: "credit_packs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "credit_pack_prices_currency_fkey"
+            columns: ["currency"]
+            isOneToOne: false
+            referencedRelation: "currencies"
+            referencedColumns: ["code"]
+          },
+        ]
+      }
+      credit_packs: {
+        Row: {
+          active: boolean
+          created_at: string
+          credits: number
+          id: string
+          name: string
+          sort_order: number
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          credits: number
+          id?: string
+          name: string
+          sort_order?: number
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          credits?: number
+          id?: string
+          name?: string
+          sort_order?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      credit_purchases: {
+        Row: {
+          amount_minor: number
+          completed_at: string | null
+          created_at: string
+          credit_pack_id: string
+          credit_pack_price_id: string | null
+          credits: number
+          currency: string
+          id: string
+          status: Database["public"]["Enums"]["credit_purchase_status"]
+          stripe_checkout_session_id: string | null
+          stripe_customer_id: string | null
+          stripe_payment_intent_id: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          amount_minor: number
+          completed_at?: string | null
+          created_at?: string
+          credit_pack_id: string
+          credit_pack_price_id?: string | null
+          credits: number
+          currency: string
+          id?: string
+          status?: Database["public"]["Enums"]["credit_purchase_status"]
+          stripe_checkout_session_id?: string | null
+          stripe_customer_id?: string | null
+          stripe_payment_intent_id?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          amount_minor?: number
+          completed_at?: string | null
+          created_at?: string
+          credit_pack_id?: string
+          credit_pack_price_id?: string | null
+          credits?: number
+          currency?: string
+          id?: string
+          status?: Database["public"]["Enums"]["credit_purchase_status"]
+          stripe_checkout_session_id?: string | null
+          stripe_customer_id?: string | null
+          stripe_payment_intent_id?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "credit_purchases_credit_pack_id_fkey"
+            columns: ["credit_pack_id"]
+            isOneToOne: false
+            referencedRelation: "credit_packs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "credit_purchases_currency_fkey"
+            columns: ["currency"]
+            isOneToOne: false
+            referencedRelation: "currencies"
+            referencedColumns: ["code"]
+          },
+          {
+            foreignKeyName: "credit_purchases_price_currency_fkey"
+            columns: ["credit_pack_price_id", "currency"]
+            isOneToOne: false
+            referencedRelation: "credit_pack_prices"
+            referencedColumns: ["id", "currency"]
+          },
+          {
+            foreignKeyName: "credit_purchases_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
           },
         ]
       }
@@ -454,6 +752,53 @@ export type Database = {
             columns: ["marketplace_id"]
             isOneToOne: false
             referencedRelation: "marketplaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      ingestion_runs: {
+        Row: {
+          error: Json | null
+          finished_at: string | null
+          id: string
+          market_id: string
+          rows_failed: number
+          rows_in: number
+          rows_upserted: number
+          source: string
+          started_at: string
+          status: string
+        }
+        Insert: {
+          error?: Json | null
+          finished_at?: string | null
+          id?: string
+          market_id: string
+          rows_failed?: number
+          rows_in?: number
+          rows_upserted?: number
+          source: string
+          started_at?: string
+          status: string
+        }
+        Update: {
+          error?: Json | null
+          finished_at?: string | null
+          id?: string
+          market_id?: string
+          rows_failed?: number
+          rows_in?: number
+          rows_upserted?: number
+          source?: string
+          started_at?: string
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ingestion_runs_market_id_fkey"
+            columns: ["market_id"]
+            isOneToOne: false
+            referencedRelation: "markets"
             referencedColumns: ["id"]
           },
         ]
@@ -1108,6 +1453,33 @@ export type Database = {
           },
         ]
       }
+      stripe_webhook_events: {
+        Row: {
+          error: string | null
+          payload: Json
+          processed_at: string | null
+          received_at: string
+          stripe_event_id: string
+          type: string
+        }
+        Insert: {
+          error?: string | null
+          payload: Json
+          processed_at?: string | null
+          received_at?: string
+          stripe_event_id: string
+          type: string
+        }
+        Update: {
+          error?: string | null
+          payload?: Json
+          processed_at?: string | null
+          received_at?: string
+          stripe_event_id?: string
+          type?: string
+        }
+        Relationships: []
+      }
       tax_schedules: {
         Row: {
           country_code: string
@@ -1244,6 +1616,16 @@ export type Database = {
     }
     Enums: {
       component_band: "low" | "medium" | "high"
+      credit_purchase_status: "pending" | "paid" | "failed" | "refunded"
+      credit_reason:
+        | "signup_grant"
+        | "purchase"
+        | "unlock_deal"
+        | "barcode_lookup"
+        | "refund"
+        | "chargeback"
+        | "admin_adjust"
+        | "promo"
       deal_status: "draft" | "active" | "retired"
       fulfilment_type: "marketplace_fulfilled" | "seller_fulfilled"
       gtin_format: "upc_a" | "ean_13" | "ean_8" | "isbn_13"
@@ -1388,6 +1770,17 @@ export const Constants = {
   public: {
     Enums: {
       component_band: ["low", "medium", "high"],
+      credit_purchase_status: ["pending", "paid", "failed", "refunded"],
+      credit_reason: [
+        "signup_grant",
+        "purchase",
+        "unlock_deal",
+        "barcode_lookup",
+        "refund",
+        "chargeback",
+        "admin_adjust",
+        "promo",
+      ],
       deal_status: ["draft", "active", "retired"],
       fulfilment_type: ["marketplace_fulfilled", "seller_fulfilled"],
       gtin_format: ["upc_a", "ean_13", "ean_8", "isbn_13"],
