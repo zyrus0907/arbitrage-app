@@ -77,6 +77,51 @@ export const publicEnv: PublicEnv = parsePublicEnv({
   NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
 });
 
+/**
+ * Required-at-use-site accessors (T02).
+ *
+ * The Supabase variables stay `.optional()` in the schemas above so the
+ * repository can still be typechecked, tested and built without any Supabase
+ * credentials — CI has none, and a build that demanded them would be a build
+ * that could only run on a developer's machine. Instead, each Supabase client
+ * asserts what *it* needs at the moment it constructs a connection, and fails
+ * loudly with the variable name when it is absent.
+ */
+
+export type PublicSupabaseEnv = {
+  url: string;
+  anonKey: string;
+};
+
+export function requirePublicSupabaseEnv(env: PublicEnv = publicEnv): PublicSupabaseEnv {
+  const missing: string[] = [];
+  if (!env.NEXT_PUBLIC_SUPABASE_URL) missing.push('NEXT_PUBLIC_SUPABASE_URL');
+  if (!env.NEXT_PUBLIC_SUPABASE_ANON_KEY) missing.push('NEXT_PUBLIC_SUPABASE_ANON_KEY');
+  if (missing.length > 0) {
+    throw new EnvValidationError(
+      'public',
+      missing.map((name) => `${name}: required to construct a Supabase client`),
+    );
+  }
+  return {
+    url: env.NEXT_PUBLIC_SUPABASE_URL as string,
+    anonKey: env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string,
+  };
+}
+
+/**
+ * The service-role key. Bypasses RLS, so this is only ever called from
+ * `src/lib/supabase/admin.ts`, which is itself `server-only`.
+ */
+export function requireServiceRoleKey(env: ServerEnv = serverEnv): string {
+  if (!env.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new EnvValidationError('server', [
+      'SUPABASE_SERVICE_ROLE_KEY: required to construct the Supabase admin client',
+    ]);
+  }
+  return env.SUPABASE_SERVICE_ROLE_KEY;
+}
+
 export const serverEnv: ServerEnv = parseServerEnv({
   NODE_ENV: process.env.NODE_ENV,
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,

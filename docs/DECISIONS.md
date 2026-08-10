@@ -88,3 +88,60 @@ value is rejected rather than treated as unset.
 instead of failing later as an `undefined` inside a request path. The separation
 makes "is this secret client-reachable?" answerable by reading one file — which
 is what the T11 security review will check.
+
+---
+
+## ADR-0004 — Supabase clients, the `server-only` boundary, and forward-only migrations
+
+**Status:** Accepted · T02 · 2026-08-10
+
+**Context.** ARCHITECTURE.md §6.2 specifies three Supabase clients with three
+different privilege levels. The dangerous one is the admin client: it holds the
+service-role key and bypasses RLS entirely, so a single accidental import from a
+Client Component publishes a key that can read and write every table. §6.3 makes
+RLS the real authorisation boundary, which only holds if the session-bound
+server client never quietly acquires service-role privileges.
+
+**Decision.**
+
+1. **Three files, three privileges, no shared factory.** `browser.ts` (anon),
+   `server.ts` (anon + session via `@supabase/ssr`, `getAll`/`setAll` against the
+   App Router cookie jar), `admin.ts` (service role). A shared factory
+   parameterised by key would put the decision "which key" at a call site, which
+   is exactly where it must not be.
+
+2. **`import 'server-only'` is the first line of `admin.ts`.** The package
+   resolves to an empty module under the `react-server` condition and to a
+   throwing module under every other, so a `'use client'` import fails
+   `next build` rather than shipping the key. This was verified empirically, not
+   assumed: a probe page importing the admin client was built and the build
+   failed with *"'server-only' cannot be imported from a Client Component
+   module"*. `tests/unit/supabase/` locks in both the position of the line and
+   the throwing behaviour, the latter by importing under Vitest's non-
+   `react-server` resolution — the same condition a client bundle uses.
+
+3. **The Supabase environment variables stay `.optional()` in `src/lib/env.ts`;
+   each client asserts what it needs at construction.** Making them required at
+   boot would mean the repository could not be typechecked, tested or built
+   without live credentials, which breaks CI and every clean checkout. The
+   trade-off is that a missing variable surfaces on first client construction
+   rather than at boot; it surfaces *named*, via `requirePublicSupabaseEnv` /
+   `requireServiceRoleKey`, which is the property that mattered in ADR-0003.
+
+4. **Rollback is a forward migration, not a `down` command.** Supabase's
+   migration tooling is forward-only. Rather than inventing a `down`-migration
+   convention the tooling would not honour, `docs/RUNBOOK.md` §8 documents the
+   supported path: a new migration that inverts the previous one, an
+   expand → migrate → contract sequence for destructive changes, and `db dump`
+   before anything irreversible.
+
+5. **`src/types/database.ts` is generated and committed**, even while the
+   application schema is empty. Committing the empty-schema shape now means every
+   later schema change arrives as a reviewable diff of one file, and all three
+   clients are already parameterised by `Database`.
+
+**Consequences.** The privilege boundary is enforced by the build rather than by
+review discipline. Adding a fourth client, or importing the admin client into a
+Client Component, cannot pass CI silently. Migration history is linear and
+replayable in every environment; the cost is that undoing a destructive change
+requires a backup taken beforehand, which §8.4 makes an explicit step.
