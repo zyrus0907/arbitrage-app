@@ -122,6 +122,18 @@ export function requireServiceRoleKey(env: ServerEnv = serverEnv): string {
   return env.SUPABASE_SERVICE_ROLE_KEY;
 }
 
+/**
+ * Whether the service-role key is configured — a boolean, never the value.
+ *
+ * Diagnostics surfaces want to report "credentials present" without holding the
+ * credential. This accessor exists so they can, and so the name of the variable
+ * stays inside this module and `supabase/admin.ts`; the source-scanning test in
+ * `tests/unit/supabase/` enforces exactly that boundary.
+ */
+export function hasServiceRoleKey(env: ServerEnv = serverEnv): boolean {
+  return Boolean(env.SUPABASE_SERVICE_ROLE_KEY);
+}
+
 export const serverEnv: ServerEnv = parseServerEnv({
   NODE_ENV: process.env.NODE_ENV,
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,

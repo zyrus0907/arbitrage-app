@@ -1,10 +1,17 @@
-import { messages } from '@/messages/en';
+import { DevDashboard } from '@/components/dev/dev-dashboard';
+import { getDevDashboardSnapshot } from '@/lib/dev-dashboard/snapshot';
 
-export default function HomePage() {
-  return (
-    <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-3 p-6">
-      <h1 className="text-2xl font-semibold tracking-tight">{messages.home.heading}</h1>
-      <p className="text-sm text-neutral-600 dark:text-neutral-400">{messages.home.body}</p>
-    </main>
-  );
+/**
+ * Development dashboard (interim). Replaces the T01 placeholder home page and
+ * is itself replaced by the marketing landing page when `(marketing)/` lands.
+ *
+ * A dashboard whose figures were captured at build time would be worse than no
+ * dashboard, so this route is never prerendered — every request re-reads the
+ * database.
+ */
+export const dynamic = 'force-dynamic';
+
+export default async function HomePage() {
+  const snapshot = await getDevDashboardSnapshot();
+  return <DevDashboard snapshot={snapshot} />;
 }
