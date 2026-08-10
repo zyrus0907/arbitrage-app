@@ -43,11 +43,18 @@ select has_function('public', 'handle_new_user',
 -- B. RLS default deny (§6.3) — enabled everywhere, no policies at T03
 -- ---------------------------------------------------------------------------
 
+-- Named rather than counted over the whole schema: later tasks add tables, and
+-- an assertion that has to be renumbered every time is one that eventually gets
+-- renumbered without being read. Schema B's five are asserted in schema_b.test.sql.
 select is(
   (select count(*)::int
      from pg_class c
      join pg_namespace n on n.oid = c.relnamespace
-    where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity),
+    where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity
+      and c.relname in (
+        'currencies', 'countries', 'marketplaces', 'markets', 'tax_schedules',
+        'fee_schedules', 'profiles', 'retailers', 'retailer_products',
+        'marketplace_products', 'product_matches')),
   11,
   'RLS is enabled on all eleven Schema A tables');
 

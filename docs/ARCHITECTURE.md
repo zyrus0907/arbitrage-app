@@ -194,7 +194,8 @@ profiles ─1:N─ credit_ledger · deal_unlocks · watchlist_items
               · purchase_records · barcode_lookups · credit_purchases
 
 retailer_products ─1:N─ product_matches ─N:1─ marketplace_products
-(retailer_product, marketplace_product) ─1:1─ deals  [current deal per pair]
+(retailer_product, marketplace_product) ─1:1─ deals  [one LIVE deal per pair:
+                                                     unique where status <> 'retired']
 deals ─N:1─ fee_schedules · tax_schedules
 ```
 
@@ -356,10 +357,31 @@ PK/unique: `(marketplace_id, external_id)`. Index on `gtins` (GIN), `refreshed_a
 | score_breakdown | jsonb | components, weights, renormalisation, penalties |
 | calc_version, score_version | text | |
 | inputs_snapshot | jsonb | every input, frozen, including the resolved MarketContext |
-| computed_at, expires_at | timestamptz | |
-| status | enum | `active` \| `stale` \| `retired` |
+| computed_at, expires_at | timestamptz | `expires_at` is the freshness horizon — see the staleness note below |
+| **status** | enum | `draft` \| `active` \| `retired`, **NOT NULL DEFAULT `draft`** (ADR-0009) |
+| **published_at, published_by** | timestamptz, uuid | when and by whom the deal was published; `published_by` → `auth.users`, `ON DELETE SET NULL` |
+| **retired_at, retired_by, retire_reason** | timestamptz, uuid, text | the same for retirement, plus why |
 
 Indexes: `(market_id, status, deal_score desc)`, `(market_id, status, roi_bps desc)`, `(market_id, status, computed_at desc)`.
+
+**Deal lifecycle (ADR-0009).** A deal is created `draft`, may be published to `active`, and may be retired from either state. **Retired is terminal.**
+
+```
+INSERT ──▶ draft ──▶ active ──▶ retired ✗ (terminal)
+             │                    ▲
+             └────────────────────┘
+  draft→draft ✓   active→active ✓   (recompute in place)
+  active→draft ✗  retired→active ✗  retired→draft ✗
+```
+
+Enforced in the database by a `BEFORE INSERT OR UPDATE` trigger, because a transition rule compares OLD to NEW and PostgreSQL has no declarative form for that. Two consequences that are load-bearing, not incidental:
+
+- **An INSERT must be `draft`.** Publication is therefore always a later UPDATE. The computation pipeline (§1.4, T19) has no path that produces a user-visible deal, whatever it intends — this is AC3.3 enforced at the storage layer rather than trusted to a service.
+- **Only the timestamps are stamped by the database**; `published_by` and `retired_by` are supplied by the caller. The database knows *when*, only the API knows *who*, and **who is allowed** to publish or retire is an authorization question owned by the admin lifecycle API (T20A) and the console (T33) — never by this trigger.
+
+**Staleness is derived, never stored.** There is deliberately no `stale` status. Freshness is a function of two timestamps — `deals.expires_at` and `marketplace_products.refreshed_at` — evaluated at read time. A derived fact stored as a state needs a writer, the writer needs a schedule, and between runs the column lies; §12.2 principle 4 wants stale-but-labelled data, which requires knowing the age, not a flag. A deal past its expiry is still `active` and the read layer labels it (AC5.3).
+
+**Uniqueness: one *live* deal per pair.** The partial unique index on `(retailer_product_id, marketplace_product_id)` uses the predicate **`WHERE status <> 'retired'`**. Draft and active are both "the current answer for this pair", so only one may exist across the two — otherwise a recompute stacks drafts behind a published deal and an admin is choosing between duplicates. Retired rows drop out of the index entirely, which keeps the history *and* lets a fresh draft replace a retired deal.
 
 > **Every feed query is market-scoped.** `market_id` leads every composite index because "show me deals" always means "in my market". A query that forgets it is a bug that will surface as a user in Germany seeing a Tesco price in pounds.
 

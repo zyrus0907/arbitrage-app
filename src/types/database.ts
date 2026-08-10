@@ -14,6 +14,67 @@ export type Database = {
   }
   public: {
     Tables: {
+      barcode_lookups: {
+        Row: {
+          barcode_raw: string
+          created_at: string
+          credits_spent: number
+          gtin14: string | null
+          id: string
+          market_id: string
+          resolved_marketplace_product_id: string | null
+          result: Json | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          barcode_raw: string
+          created_at?: string
+          credits_spent?: number
+          gtin14?: string | null
+          id?: string
+          market_id: string
+          resolved_marketplace_product_id?: string | null
+          result?: Json | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          barcode_raw?: string
+          created_at?: string
+          credits_spent?: number
+          gtin14?: string | null
+          id?: string
+          market_id?: string
+          resolved_marketplace_product_id?: string | null
+          result?: Json | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "barcode_lookups_market_id_fkey"
+            columns: ["market_id"]
+            isOneToOne: false
+            referencedRelation: "markets"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "barcode_lookups_resolved_marketplace_product_id_fkey"
+            columns: ["resolved_marketplace_product_id"]
+            isOneToOne: false
+            referencedRelation: "marketplace_products"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "barcode_lookups_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       countries: {
         Row: {
           active: boolean
@@ -87,6 +148,249 @@ export type Database = {
           updated_at?: string
         }
         Relationships: []
+      }
+      deal_unlocks: {
+        Row: {
+          created_at: string
+          credits_spent: number
+          deal_id: string
+          id: string
+          unlocked_at: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          credits_spent: number
+          deal_id: string
+          id?: string
+          unlocked_at?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          credits_spent?: number
+          deal_id?: string
+          id?: string
+          unlocked_at?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "deal_unlocks_deal_id_fkey"
+            columns: ["deal_id"]
+            isOneToOne: false
+            referencedRelation: "deals"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "deal_unlocks_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      deals: {
+        Row: {
+          buy_price_minor: number
+          buy_price_tax_treatment: Database["public"]["Enums"]["price_tax_treatment"]
+          buy_tax_reclaim_minor: number
+          calc_version: string
+          competition_band: Database["public"]["Enums"]["component_band"]
+          computed_at: string
+          confidence_band: Database["public"]["Enums"]["component_band"]
+          created_at: string
+          currency: string
+          deal_score: number
+          demand_band: Database["public"]["Enums"]["component_band"]
+          expires_at: string | null
+          fee_schedule_id: string
+          fulfilment_fee_minor: number
+          id: string
+          inbound_shipping_minor: number
+          inputs_snapshot: Json
+          margin_bps: number
+          market_id: string
+          marketplace_id: string
+          marketplace_product_id: string
+          match_confidence: number
+          net_profit_minor: number
+          other_fees_minor: number
+          prep_cost_minor: number
+          published_at: string | null
+          published_by: string | null
+          referral_fee_minor: number
+          retailer_id: string
+          retailer_product_id: string
+          retire_reason: string | null
+          retired_at: string | null
+          retired_by: string | null
+          roi_bps: number
+          score_breakdown: Json
+          score_version: string
+          sell_price_minor: number
+          sell_tax_liability_minor: number
+          stability_band: Database["public"]["Enums"]["component_band"]
+          status: Database["public"]["Enums"]["deal_status"]
+          storage_fee_minor: number
+          surcharges: Json
+          tax_schedule_id: string
+          updated_at: string
+        }
+        Insert: {
+          buy_price_minor: number
+          buy_price_tax_treatment: Database["public"]["Enums"]["price_tax_treatment"]
+          buy_tax_reclaim_minor?: number
+          calc_version: string
+          competition_band: Database["public"]["Enums"]["component_band"]
+          computed_at?: string
+          confidence_band: Database["public"]["Enums"]["component_band"]
+          created_at?: string
+          currency: string
+          deal_score: number
+          demand_band: Database["public"]["Enums"]["component_band"]
+          expires_at?: string | null
+          fee_schedule_id: string
+          fulfilment_fee_minor?: number
+          id?: string
+          inbound_shipping_minor?: number
+          inputs_snapshot: Json
+          margin_bps: number
+          market_id: string
+          marketplace_id: string
+          marketplace_product_id: string
+          match_confidence: number
+          net_profit_minor: number
+          other_fees_minor?: number
+          prep_cost_minor?: number
+          published_at?: string | null
+          published_by?: string | null
+          referral_fee_minor?: number
+          retailer_id: string
+          retailer_product_id: string
+          retire_reason?: string | null
+          retired_at?: string | null
+          retired_by?: string | null
+          roi_bps: number
+          score_breakdown: Json
+          score_version: string
+          sell_price_minor: number
+          sell_tax_liability_minor?: number
+          stability_band: Database["public"]["Enums"]["component_band"]
+          status?: Database["public"]["Enums"]["deal_status"]
+          storage_fee_minor?: number
+          surcharges?: Json
+          tax_schedule_id: string
+          updated_at?: string
+        }
+        Update: {
+          buy_price_minor?: number
+          buy_price_tax_treatment?: Database["public"]["Enums"]["price_tax_treatment"]
+          buy_tax_reclaim_minor?: number
+          calc_version?: string
+          competition_band?: Database["public"]["Enums"]["component_band"]
+          computed_at?: string
+          confidence_band?: Database["public"]["Enums"]["component_band"]
+          created_at?: string
+          currency?: string
+          deal_score?: number
+          demand_band?: Database["public"]["Enums"]["component_band"]
+          expires_at?: string | null
+          fee_schedule_id?: string
+          fulfilment_fee_minor?: number
+          id?: string
+          inbound_shipping_minor?: number
+          inputs_snapshot?: Json
+          margin_bps?: number
+          market_id?: string
+          marketplace_id?: string
+          marketplace_product_id?: string
+          match_confidence?: number
+          net_profit_minor?: number
+          other_fees_minor?: number
+          prep_cost_minor?: number
+          published_at?: string | null
+          published_by?: string | null
+          referral_fee_minor?: number
+          retailer_id?: string
+          retailer_product_id?: string
+          retire_reason?: string | null
+          retired_at?: string | null
+          retired_by?: string | null
+          roi_bps?: number
+          score_breakdown?: Json
+          score_version?: string
+          sell_price_minor?: number
+          sell_tax_liability_minor?: number
+          stability_band?: Database["public"]["Enums"]["component_band"]
+          status?: Database["public"]["Enums"]["deal_status"]
+          storage_fee_minor?: number
+          surcharges?: Json
+          tax_schedule_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "deals_currency_fkey"
+            columns: ["currency"]
+            isOneToOne: false
+            referencedRelation: "currencies"
+            referencedColumns: ["code"]
+          },
+          {
+            foreignKeyName: "deals_fee_schedule_id_fkey"
+            columns: ["fee_schedule_id"]
+            isOneToOne: false
+            referencedRelation: "fee_schedules"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "deals_market_currency_fkey"
+            columns: ["market_id", "currency"]
+            isOneToOne: false
+            referencedRelation: "markets"
+            referencedColumns: ["id", "currency"]
+          },
+          {
+            foreignKeyName: "deals_market_marketplace_fkey"
+            columns: ["market_id", "marketplace_id"]
+            isOneToOne: false
+            referencedRelation: "markets"
+            referencedColumns: ["id", "marketplace_id"]
+          },
+          {
+            foreignKeyName: "deals_marketplace_product_fkey"
+            columns: ["marketplace_product_id", "marketplace_id"]
+            isOneToOne: false
+            referencedRelation: "marketplace_products"
+            referencedColumns: ["id", "marketplace_id"]
+          },
+          {
+            foreignKeyName: "deals_retailer_market_fkey"
+            columns: ["retailer_id", "market_id"]
+            isOneToOne: false
+            referencedRelation: "retailers"
+            referencedColumns: ["id", "market_id"]
+          },
+          {
+            foreignKeyName: "deals_retailer_product_fkey"
+            columns: ["retailer_product_id", "retailer_id"]
+            isOneToOne: false
+            referencedRelation: "retailer_products"
+            referencedColumns: ["id", "retailer_id"]
+          },
+          {
+            foreignKeyName: "deals_tax_schedule_id_fkey"
+            columns: ["tax_schedule_id"]
+            isOneToOne: false
+            referencedRelation: "tax_schedules"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       fee_schedules: {
         Row: {
@@ -549,6 +853,85 @@ export type Database = {
           },
         ]
       }
+      purchase_records: {
+        Row: {
+          actual_buy_price_minor: number | null
+          actual_profit_minor: number | null
+          actual_sale_price_minor: number | null
+          created_at: string
+          currency: string
+          deal_id: string
+          expected_profit_minor: number
+          id: string
+          inputs_snapshot: Json
+          market_id: string
+          notes: string | null
+          outcome: Database["public"]["Enums"]["purchase_outcome"]
+          purchased_at: string
+          units: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          actual_buy_price_minor?: number | null
+          actual_profit_minor?: number | null
+          actual_sale_price_minor?: number | null
+          created_at?: string
+          currency: string
+          deal_id: string
+          expected_profit_minor: number
+          id?: string
+          inputs_snapshot: Json
+          market_id: string
+          notes?: string | null
+          outcome?: Database["public"]["Enums"]["purchase_outcome"]
+          purchased_at?: string
+          units: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          actual_buy_price_minor?: number | null
+          actual_profit_minor?: number | null
+          actual_sale_price_minor?: number | null
+          created_at?: string
+          currency?: string
+          deal_id?: string
+          expected_profit_minor?: number
+          id?: string
+          inputs_snapshot?: Json
+          market_id?: string
+          notes?: string | null
+          outcome?: Database["public"]["Enums"]["purchase_outcome"]
+          purchased_at?: string
+          units?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "purchase_records_deal_currency_fkey"
+            columns: ["deal_id", "currency"]
+            isOneToOne: false
+            referencedRelation: "deals"
+            referencedColumns: ["id", "currency"]
+          },
+          {
+            foreignKeyName: "purchase_records_deal_market_fkey"
+            columns: ["deal_id", "market_id"]
+            isOneToOne: false
+            referencedRelation: "deals"
+            referencedColumns: ["id", "market_id"]
+          },
+          {
+            foreignKeyName: "purchase_records_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       retailer_products: {
         Row: {
           asin_hint: string | null
@@ -787,6 +1170,71 @@ export type Database = {
           },
         ]
       }
+      watchlist_items: {
+        Row: {
+          created_at: string
+          currency: string | null
+          deal_id: string
+          id: string
+          marketplace_product_id: string
+          note: string | null
+          target_profit_minor: number | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          currency?: string | null
+          deal_id: string
+          id?: string
+          marketplace_product_id: string
+          note?: string | null
+          target_profit_minor?: number | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          currency?: string | null
+          deal_id?: string
+          id?: string
+          marketplace_product_id?: string
+          note?: string | null
+          target_profit_minor?: number | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "watchlist_items_currency_fkey"
+            columns: ["currency"]
+            isOneToOne: false
+            referencedRelation: "currencies"
+            referencedColumns: ["code"]
+          },
+          {
+            foreignKeyName: "watchlist_items_deal_currency_fkey"
+            columns: ["deal_id", "currency"]
+            isOneToOne: false
+            referencedRelation: "deals"
+            referencedColumns: ["id", "currency"]
+          },
+          {
+            foreignKeyName: "watchlist_items_deal_product_fkey"
+            columns: ["deal_id", "marketplace_product_id"]
+            isOneToOne: false
+            referencedRelation: "deals"
+            referencedColumns: ["id", "marketplace_product_id"]
+          },
+          {
+            foreignKeyName: "watchlist_items_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
@@ -795,6 +1243,8 @@ export type Database = {
       [_ in never]: never
     }
     Enums: {
+      component_band: "low" | "medium" | "high"
+      deal_status: "draft" | "active" | "retired"
       fulfilment_type: "marketplace_fulfilled" | "seller_fulfilled"
       gtin_format: "upc_a" | "ean_13" | "ean_8" | "isbn_13"
       market_launch_status: "live" | "beta" | "planned"
@@ -806,6 +1256,7 @@ export type Database = {
         | "barcode_scan"
       match_verified_by: "system" | "admin" | "user_report"
       price_tax_treatment: "inclusive" | "exclusive"
+      purchase_outcome: "pending" | "sold" | "partial" | "unsold" | "returned"
       retailer_source_type: "affiliate_feed" | "api" | "curated" | "manual"
       tax_regime: "vat" | "gst" | "sales_tax" | "none"
       tax_scheme: "standard" | "simplified"
@@ -936,6 +1387,8 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
+      component_band: ["low", "medium", "high"],
+      deal_status: ["draft", "active", "retired"],
       fulfilment_type: ["marketplace_fulfilled", "seller_fulfilled"],
       gtin_format: ["upc_a", "ean_13", "ean_8", "isbn_13"],
       market_launch_status: ["live", "beta", "planned"],
@@ -948,6 +1401,7 @@ export const Constants = {
       ],
       match_verified_by: ["system", "admin", "user_report"],
       price_tax_treatment: ["inclusive", "exclusive"],
+      purchase_outcome: ["pending", "sold", "partial", "unsold", "returned"],
       retailer_source_type: ["affiliate_feed", "api", "curated", "manual"],
       tax_regime: ["vat", "gst", "sales_tax", "none"],
       tax_scheme: ["standard", "simplified"],

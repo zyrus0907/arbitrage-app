@@ -2,9 +2,9 @@
 
 **Project:** Global Retail-to-Marketplace Arbitrage App
 **Document owner:** Technical Project Manager
-**Version:** 2.1 — global-first, marketplace-agnostic, Amazon-first MVP
+**Version:** 2.2 — global-first, marketplace-agnostic, Amazon-first MVP
 **Source documents:** `ARCHITECTURE.md` v2.0 (technical contract) · `PRODUCT_SPEC.md` v2.0 (scope contract)
-**Status:** In execution. **T01–T03 complete.** Next task: T04.
+**Status:** In execution. **T01–T04 complete.** Next task: T05.
 
 > **Execution scope:** Build a global-first core, but operate exactly one launch market during MVP. Amazon is the only marketplace integration in MVP. Country, currency, tax regime and marketplace must be data/configuration concepts, not hard-coded application assumptions.
 
@@ -33,11 +33,23 @@ Planning corrections arising from the T03 post-completion review. **No product s
 - Deferred `fx_rates` to Phase 3 (ADR-005); stated as out of scope in T08.
 - Added global rule 8 (privilege posture on every migration).
 
+## Changelog: v2.1 → v2.2
+
+A **product decision** taken during T04, when the schema work surfaced that `ARCHITECTURE.md`'s `deal_status` (`active | stale | retired`) had no unpublished state, while T19 and AC3.3 both require one. Recorded as ADR-0009. **No product scope changed. No priority changed. No task was removed.**
+
+- `deal_status` becomes **`draft | active | retired`**, defaulting to `draft`. `stale` is removed: staleness is derived from `deals.expires_at` and `marketplace_products.refreshed_at`, never stored.
+- **Retired is terminal.** The legal transitions are enforced in the database by a trigger; T04 owns the transition rules, not who may request one.
+- Added publish/retire audit columns to `deals`.
+- The deal-pair unique index predicate becomes `status <> 'retired'` — one *live* deal per pair, and a retired deal never blocks its replacement.
+- **Added T20A** — admin deal lifecycle API (publish/retire). Depends on T19 and T20, blocks T33.
+- Propagated into T19 (drafts only, never publishes, auto-retires on suppression, skips rejected matches), T22 and T29 (feed predicate is exactly `status = 'active'`), T24 (a confirmed bad match marks `product_matches` rejected), T27 (the pipeline test proves zero active deals without an admin publish) and T33 (publish/retire call T20A).
+- Added AC3.7–AC3.10 and AC15.6 to `PRODUCT_SPEC.md`.
+
 ---
 
 ## 0. How to use this document
 
-45 tasks: **T01–T40 (including T05A) are P0** (beta cannot start without them), **T41–T44 are P1** (ship during beta only if the P0 loop is stable). P2 items from `PRODUCT_SPEC.md` §5.3 appear nowhere in this plan by design.
+46 tasks: **T01–T40 (including T05A and T20A) are P0** (beta cannot start without them), **T41–T44 are P1** (ship during beta only if the P0 loop is stable). P2 items from `PRODUCT_SPEC.md` §5.3 appear nowhere in this plan by design.
 
 **Rules of engagement for every task:**
 
@@ -132,7 +144,9 @@ Planning corrections arising from the T03 post-completion review. **No product s
 
 ---
 
-## T04 — Schema B: deals, user activity and market scoping
+## ✅ T04 — Schema B: deals, user activity and market scoping
+
+> **Status: COMPLETE.**
 
 - **Goal:** Create the market-scoped deal read model and user activity tables.
 - **Agent:** Database Engineer
@@ -147,10 +161,21 @@ Planning corrections arising from the T03 post-completion review. **No product s
   - Fees: `referral_fee_minor`, `fulfilment_fee_minor`, `storage_fee_minor`, `other_fees_minor`, `surcharges jsonb`, `fee_schedule_id` FK, `tax_schedule_id` FK
   - Outputs: `net_profit_minor`, `roi_bps` int, `margin_bps` int, `deal_score` int, `demand_band`, `competition_band`, `stability_band`, `confidence_band`, `score_breakdown jsonb`
   - Provenance: `calc_version`, `score_version`, `inputs_snapshot jsonb`, `computed_at`, `expires_at`, `status`
+  - Lifecycle audit (added v2.2, ADR-0009): `published_at`, `published_by`, `retired_at`, `retired_by`, `retire_reason`
   - `deals` references `retailer_product_id` and `marketplace_product_id`, never a marketplace external ID directly.
-  - One current active deal per `(retailer_product_id, marketplace_product_id)` via partial unique index on `status = 'active'`.
+  - One **live** deal per `(retailer_product_id, marketplace_product_id)` via partial unique index on **`status <> 'retired'`**. Draft and active are both "the current answer for this pair", so only one may exist across the two; retired rows drop out of the index so history is kept and a fresh draft can always replace a retired deal.
   - Market leads feed indexes: `(market_id, status, deal_score desc)`, `(market_id, status, roi_bps desc)`, `(market_id, status, computed_at desc)`.
-  - Check constraints: `deal_score` between 0 and 100; `roi_bps` and `margin_bps` are integers; no money-bearing row without a currency.
+  - Check constraints: `deal_score` between 0 and 100; `roi_bps` and `margin_bps` are integers; no money-bearing row without a currency; the audit columns cannot disagree with the state they describe (an `active` deal has a `published_at`; `retired_at` is present exactly when `status = 'retired'`; a `retire_reason` requires retirement).
+
+  **Deal lifecycle — new in v2.2 (ADR-0009, product decision taken during T04).** `deal_status` is **`draft | active | retired`**. There is no `stale`.
+  - `deals.status` is `NOT NULL DEFAULT 'draft'`, so a writer that omits it fails closed into an unpublished state.
+  - Allowed: INSERT → `draft` only · `draft → draft` · `draft → active` · `draft → retired` · `active → active` · `active → retired`. A retired row may still have its other columns corrected, but its state never changes again.
+  - Rejected: `active → draft` · `retired → active` · `retired → draft`. **Retired is terminal.**
+  - Enforced by a `BEFORE INSERT OR UPDATE ... FOR EACH ROW` trigger, because a transition rule compares OLD to NEW and PostgreSQL has no declarative form for that. This is the one place a trigger is correct; the cross-market rules below stay declarative.
+  - Because an INSERT must be `draft`, **publication is always a later UPDATE** — no ingestion or recompute path can produce a user-visible deal (AC3.3, AC3.7).
+  - The trigger stamps `published_at`/`retired_at` when a caller leaves them absent, and never touches `published_by`/`retired_by`. **T04 enforces valid transitions only. It does not enforce actor authorization** — who may publish or retire is T20A's and T33's.
+  - `published_by`/`retired_by` reference `auth.users` with `ON DELETE SET NULL`: deleting an account must neither delete the fact that a deal was published nor block the deletion AC1.5 requires.
+  - **Staleness is not a status.** It is derived at read time from `deals.expires_at` and `marketplace_products.refreshed_at`. No `stale` enum value, no equivalent boolean, no stored freshness column.
 
   **Cross-market consistency — new in v2.1 (ADR-007).** A `deals` row must not be able to reference a retailer product and a marketplace product that do not both belong to its market. This is enforced **in the database**, not by pipeline convention:
   - `deals.market_id` must equal the market of `retailer_product_id`'s retailer.
@@ -167,6 +192,7 @@ Planning corrections arising from the T03 post-completion review. **No product s
   **Enum discipline — new in v2.1:**
   - T03 created 9 enum types. **Inventory the existing types before creating any new one** and reuse where the domain matches. In particular, the four band columns share one domain (`low|medium|high`) and must use **one** shared enum type reused four times, not four near-identical types.
   - Any genuinely new type is listed in the PR description with a one-line justification for why an existing type would not serve.
+  - The retail price basis (`buy_price_tax_treatment`) reuses T03's `price_tax_treatment`; it is not a new type.
 
   **Privilege posture — new in v2.1 (ADR-004, global rule 8):**
   - RLS enabled on every new table, **no policies yet** — policies and grants both land in T06.
@@ -177,7 +203,7 @@ Planning corrections arising from the T03 post-completion review. **No product s
   **Types:**
   - After the migration is applied remotely, regenerate `src/types/database.ts` via `npm run db:types` and commit it. Local-only generation does not satisfy this.
 
-- **Testing requirements:** SQL tests for: the partial unique index (two active deals for one pair rejected, one active plus one retired accepted); the 0–100 score constraint at both boundaries and outside them; currency-required constraints; enum reuse verified by inspecting `pg_type` for near-duplicates.
+- **Testing requirements:** SQL tests for: the live-pair partial unique index; the 0–100 score constraint at both boundaries and outside them; currency-required constraints; enum reuse verified by inspecting `pg_type` for near-duplicates.
 
   **Cross-market rejection tests — replaces the previous two-markets test, which was incoherent** (if the marketplace differs then `marketplace_product_id` differs, so the pair is not the same pair; and a retailer product cannot belong to two markets because its retailer has exactly one `market_id`). Using two seeded markets in fixtures:
   - Inserting a deal whose `market_id` differs from the market of its retailer product's retailer is **rejected**.
@@ -185,7 +211,19 @@ Planning corrections arising from the T03 post-completion review. **No product s
   - A correctly-scoped deal in each of the two markets is **accepted**, and the two coexist without interference.
   - Updating a valid deal's `market_id` to the other market is **rejected** (not just insert-time enforcement).
   - The rejection must occur on a bulk/`COPY`-style write as well as a single-row insert.
+
+  **Lifecycle tests — new in v2.2 (ADR-0009):**
+  - An insert that omits `status` lands as `draft`.
+  - `draft → active`, `draft → retired`, `active → active` and `active → retired` all succeed.
+  - `active → draft`, `retired → active` and `retired → draft` are all **rejected**.
+  - Two non-retired deals for the same product pair are **rejected**; one retired deal plus one new draft for that pair is **accepted**.
+  - `deal_status` carries no `stale` value, and no Schema B column stores staleness or freshness.
+  - `published_at`/`retired_at` are stamped on transition; a supplied `published_by`/`retired_by` is stored as given; deleting the actor's account nulls the reference and keeps the timestamp.
+  - Bulk and upsert paths bypass neither the lifecycle nor the live-pair uniqueness: a multi-row insert or `INSERT … SELECT` containing a non-draft row is rejected, and an upsert's `DO UPDATE` branch cannot resurrect a retired deal.
+  - The existing cross-market, RLS and privilege assertions still pass unchanged.
 - **Priority:** P0
+- **Completion note:** Schema B (`20260810125436_schema_b.sql`) applied locally from a clean `db:reset` and pushed to the linked development project; local and remote migration history match. Five tables added — `deals`, `deal_unlocks`, `watchlist_items`, `purchase_records`, `barcode_lookups` — bringing `public` to 16. Three new enum types (`component_band` shared by all four band columns, `deal_status`, `purchase_outcome`); `price_tax_treatment` reused for the retail price basis. The deal lifecycle is **`draft | active | retired`**, defaulting to `draft`, with retirement terminal and transitions enforced by a `BEFORE INSERT OR UPDATE` trigger; staleness is derived from `expires_at` and `marketplace_products.refreshed_at`, never stored. Cross-market consistency is enforced **declaratively** by composite foreign keys — the ADR-007 preference — so no bulk, `COPY` or upsert path can bypass it. RLS is enabled on all 16 tables with zero policies; `anon` and `authenticated` hold no table privileges and `service_role` holds table DML only, verified on both environments. `src/types/database.ts` regenerated from the remote and current. Test suite green: 214 pgTAP assertions (139 new in `schema_b.test.sql`) plus 50 application tests, with typecheck, lint and build clean.
+- **Decisions recorded:** ADR-0008 (cross-market consistency by composite foreign key, implementing ADR-007) and ADR-0009 (deal lifecycle — the Product Manager's resolution of the `deal_status` contradiction found during this task, which also added T20A and revised T19, T22, T24, T27, T29 and T33).
 
 ---
 
@@ -381,7 +419,7 @@ Planning corrections arising from the T03 post-completion review. **No product s
 
 ---
 
-# PHASE 2 — DEAL ENGINE (T12–T20)
+# PHASE 2 — DEAL ENGINE (T12–T20A)
 
 > These come before data plumbing deliberately. They are pure, testable, and they are the actual product.
 
@@ -540,8 +578,12 @@ Planning corrections arising from the T03 post-completion review. **No product s
 - **Acceptance criteria:**
   - Pipeline order exactly per §1.4: market resolve → match → enrich → price → score → upsert `deals`.
   - Every computed deal stores `market_id`, currency, fee/tax schedule IDs, `calc_version`, `score_version`, `score_breakdown` and a complete `inputs_snapshot` such that any historical figure can be reproduced exactly (AC6.10).
-  - Suppression rules from T16 are enforced here: a suppressed deal is **not written as active**, and the suppression reason is logged.
-  - Deals default to a non-published state; `status = 'active'` requires the explicit admin publish action in T20 (AC3.3).
+  - **New computations insert as `draft`** (ADR-0009). The database defaults `deals.status` to `draft` and rejects an insert in any other state, so this is enforced rather than trusted — but the pipeline states it explicitly rather than relying on the default.
+  - **T19 never writes `active`.** There is no code path in the pipeline that publishes a deal. Publication is an explicit admin act through T20A (AC3.3, AC3.7).
+  - Suppression rules from T16 are enforced here: **a hard-suppressed candidate is not inserted into `deals` at all**, and the suppression reason is logged against the ingestion run. A suppressed deal is not a draft — a draft is a candidate awaiting review, and a suppressed candidate has already failed review.
+  - **An `active` deal that becomes hard-suppressed on recompute is retired**, with `retire_reason = 'suppressed_on_recompute'` (AC3.9). It is never left live and never downgraded to draft — `active → draft` is rejected by the database, and a deal that no longer passes its own publication bar must stop being shown.
+  - **Rejected `product_matches` are skipped.** A match an admin has rejected after a confirmed bad-match report (T24, AC15.6) never produces a deal again — otherwise the next run recomputes the same wrong deal from the same wrong match.
+  - Because only one non-retired deal may exist per product pair, a recompute updates the existing draft/active row for that pair rather than inserting a second one.
   - Recompute is idempotent: running twice over the same inputs produces identical outputs and does not duplicate rows.
   - Partial failure is normal: a failed row increments `rows_failed` with a reason and the batch continues (§12.2 principle 6).
   - Run is batched, time-boxed within Vercel's function limits, and resumable via a cursor in `ingestion_runs`.
@@ -566,6 +608,28 @@ Planning corrections arising from the T03 post-completion review. **No product s
   - Admin-only, server-side role check.
   - **No affiliate feed adapter and no scraper is written.** Out of MVP scope.
 - **Testing requirements:** Tests for a well-formed CSV, a CSV with malformed prices, a CSV with a missing GTIN column, a duplicate SKU (upsert not duplicate), and a 500-row file completing within the function time limit.
+- **Priority:** P0
+
+---
+
+## T20A — Admin deal lifecycle API: publish and retire
+
+- **Goal:** The only sanctioned path from `draft` to `active` and from either state to `retired` (AC3.3, AC3.6, AC3.7, AC3.8, AC3.9). T04 made the transitions valid-or-rejected; this task decides **who** may request one.
+- **Agent:** Backend Engineer
+- **Dependencies:** T19, T20. **Blocks T33.**
+- **Files / areas:** `src/app/api/v1/admin/deals/[id]/{publish,retire}/route.ts`, `src/services/deals/lifecycle.ts`
+- **Why this is its own task:** the database enforces that a transition is *legal*; nothing in T04 enforces that the requester is *allowed*, and ADR-0009 says so explicitly. Left to T33 it would be written inside a React route as a side effect of a button, which is where authorization goes to die. It is small, and it is the gate in front of the only thing that makes a deal visible to a paying user.
+- **Acceptance criteria:**
+  - `POST /api/v1/admin/deals/:id/publish` moves `draft → active`, setting `published_by` to the acting admin. `POST /api/v1/admin/deals/:id/retire` moves `draft|active → retired`, setting `retired_by` and a required `retire_reason`.
+  - **Admin-only, server-side role check** on both, per §5.1 and AC16.1. No client-side hiding, no inference from a URL.
+  - Both follow the §5.1 pipeline (authenticate → resolve `MarketContext` → rate-limit → Zod-validate → delegate → typed envelope) and contain no business logic in the handler.
+  - The service is the **only** caller that writes `deals.status` outside the pipeline's draft inserts. `grep` for `status.*active` under `src/` returns nothing else that writes it.
+  - An illegal transition returns a business-rule error from the §12.1 taxonomy (409/422), **translated from the database's rejection** rather than pre-checked in application code and then re-checked. The database is the authority; the API reports it.
+  - Retiring is idempotent from the caller's point of view: retiring an already-retired deal returns success without a second write and without changing `retired_at`.
+  - Publishing a deal whose pair already has a live deal is impossible by construction (T04's index); the resulting error is surfaced as a named business rule, not a 500.
+  - Every transition writes an `app_events` row with the actor, the deal, the transition and the reason.
+  - **Reason codes are a closed set**, including `suppressed_on_recompute` (written by T19), `confirmed_bad_match` (written by T24) and admin-initiated values.
+- **Testing requirements:** Integration tests: a non-admin session receives 403 on both routes and **no state changes**; publish moves a draft to active and stamps the actor; retire from draft and from active both succeed; retire twice writes once; `retired → active` returns a business-rule error and not a 500; an `app_events` row is written per transition. A test asserting no other module writes `deals.status`.
 - **Priority:** P0
 
 ---
@@ -601,6 +665,8 @@ Planning corrections arising from the T03 post-completion review. **No product s
 - **Acceptance criteria:**
   - All three follow ARCHITECTURE.md §5.1: authenticate → resolve `MarketContext` → rate-limit → Zod-validate → delegate to service → typed envelope. **Handlers contain no business logic.**
   - Response envelope exactly per §5.2, with `requestId`, `marketId` and currency metadata where applicable.
+  - **Every user-facing deal query filters on exactly `status = 'active'`** (AC3.7). Not `<> 'retired'`, not "published-ish" — a draft is a candidate the admin has not approved, and one loose predicate puts unreviewed deals in front of paying users. A single query builder owns this predicate so it cannot be forgotten per route.
+  - `GET /deals/:id` returns a non-active deal **only** to a user who already unlocked it (AC3.6, AC10.7), and then with a `retired` flag. A draft is never returned to any user, unlocked or not.
   - Feed filters applied **server-side and market-scoped**: minimum profit, minimum ROI, minimum score, category, budget ceiling (AC8.3).
   - Default sort is Deal Score descending; deals scoring under 50 are excluded from the default feed (AC8.4).
   - Cursor pagination. No offset pagination.
@@ -608,7 +674,7 @@ Planning corrections arising from the T03 post-completion review. **No product s
   - `POST /deals/:id/recalculate` applies user overrides (sell price, prep, inbound shipping, storage months, units) against the stored `inputs_snapshot`, returns a fresh breakdown, **costs no credits**, and **never mutates the stored deal** (AC12.2, AC12.4).
   - An override producing zero or negative profit returns that plainly — never floored at zero (AC12.5).
   - Personalisation is an in-request overlay only. **No per-user precomputed table is created** (§2.2 note).
-- **Testing requirements:** Integration tests: unauthenticated request rejected; locked payload leak test re-asserted at the route level; each filter narrows correctly; cursor pagination returns no duplicates and no gaps across pages; recalculate with a negative-profit override; recalculate does not write to `deals`. Performance: feed query p95 under 300ms on a seeded 5,000-row table. Cross-market test: user/request for market A cannot retrieve a deal ID belonging to market B.
+- **Testing requirements:** Integration tests: unauthenticated request rejected; locked payload leak test re-asserted at the route level; each filter narrows correctly; cursor pagination returns no duplicates and no gaps across pages; recalculate with a negative-profit override; recalculate does not write to `deals`. Performance: feed query p95 under 300ms on a seeded 5,000-row table. Cross-market test: user/request for market A cannot retrieve a deal ID belonging to market B. **Lifecycle tests: a seeded `draft` deal never appears in the feed and returns not-found by ID even for a user who unlocked a different deal; a `retired` deal is absent from the feed but still retrievable by a user who unlocked it.**
 - **Priority:** P0
 
 ---
@@ -647,7 +713,10 @@ Planning corrections arising from the T03 post-completion review. **No product s
   - Only the owning user may create or read their purchases; RLS plus a server-side check.
   - Report accepts the fixed reason set: wrong product · wrong pack size · price wrong · out of stock · other + free text (AC15.2), and lands in the admin queue with deal, reporter and reason (AC15.3).
   - An admin confirming a report retires the deal and refunds the credit to **every** user who unlocked it, each recorded with reason `refund` (AC15.4). Refund is idempotent — confirming twice refunds once.
-- **Testing requirements:** Test that a purchase snapshot is unaffected by a subsequent deal recompute. Test the 90-day boundary either side. Test bulk refund across 5 unlockers, run twice, asserting 5 refund rows total. Test cross-user access is denied.
+  - Retirement goes through **T20A**, with `retire_reason = 'confirmed_bad_match'` where that is the confirmed reason. No route writes `deals.status` directly.
+  - **A confirmed bad-match report marks the underlying `product_matches` row rejected** (AC15.6), so T19 skips it on the next run. Retiring the deal alone is not enough: the match is what was wrong, and the pipeline would recompute the same deal from the same match and republish the same error. This task **adds the rejection marker to `product_matches` in its own migration** — T03 created that table with `method`, `confidence` and `verified_by` and no rejection concept, and T04 deliberately did not add one for a workflow that does not exist yet.
+  - Reversing a rejected match is a deliberate admin act, never automatic.
+- **Testing requirements:** Test that a purchase snapshot is unaffected by a subsequent deal recompute. Test the 90-day boundary either side. Test bulk refund across 5 unlockers, run twice, asserting 5 refund rows total. Test cross-user access is denied. **Test that after a confirmed bad-match report, a recompute over the same inputs produces no deal for that pair — the rejected match is skipped, not merely retired downstream.**
 - **Priority:** P0
 
 ---
@@ -698,8 +767,10 @@ Planning corrections arising from the T03 post-completion review. **No product s
 - **Files / areas:** `tests/integration/pipeline.test.ts`, `tests/fixtures/real-products.csv`
 - **Acceptance criteria:**
   - 20 **real** retailer products from the chosen launch market with real GTINs go through ingest → match → enrich → price → score → deals.
+  - **Every generated deal lands as `draft`, and the run produces exactly zero `active` deals.** Asserted by counting rows by status after the run, not by inspecting the code. If the pipeline can publish, this test is the place it gets caught (AC3.7).
+  - Publishing a subset through **T20A** then shows exactly that subset in the feed, and nothing else — the two halves of AC3.3 verified end to end.
   - A human reviews the 20 outputs and confirms each profit figure is **believable** — checked by hand against the launch-market marketplace listing and retailer for at least 5 of them.
-  - Suppressed deals are suppressed for the stated correct reason.
+  - Suppressed deals are suppressed for the stated correct reason, and are **absent from `deals` entirely** rather than present as drafts.
   - Keepa token cost for the launch marketplace run is recorded, and the projected cost per published deal is documented in the PR. This number feeds the credit pricing decision (Open Question B2).
   - Any discrepancy between hand calculation and engine output is raised as a **blocking defect**, not a note.
 - **Testing requirements:** This task is the test. Output is a written verification report committed to `docs/`, including the 5 hand-checked deals with workings.
@@ -738,6 +809,7 @@ Planning corrections arising from the T03 post-completion review. **No product s
 - **Files / areas:** `src/app/(app)/feed/page.tsx`, `src/components/deals/{DealCard,FeedFilters,ConfidenceBadge}.tsx`
 - **Acceptance criteria:**
   - Server-rendered feed reading the redacted, active-market-scoped API. **No client-side data-fetching library.**
+  - The feed shows **exactly `status = 'active'` deals** (AC3.7). Drafts are admin-only and belong in T33's review queue; retired deals are reachable only by a user who unlocked them (AC3.6). The UI never widens the predicate the API applies.
   - `DealCard` shows: Deal Score, profit band, ROI band, marketplace category, retailer *type*, data freshness (AC8.1).
   - `DealCard` shows **no** product name, image, marketplace external ID or retailer name — and the component has no props that could carry them.
   - Filters: minimum profit, minimum ROI, minimum score, category, budget ceiling; applied server-side via URL search params so state is shareable and back-button-correct (AC8.3).
@@ -814,11 +886,13 @@ Planning corrections arising from the T03 post-completion review. **No product s
 
 - **Goal:** The founder can run curation, review matches, publish, retire, refund and compare predicted versus actual (F16).
 - **Agent:** Frontend Engineer
-- **Dependencies:** T20, T24, T28
+- **Dependencies:** T20, **T20A**, T24, T28
 - **Files / areas:** `src/app/admin/**`, `src/components/admin/*`
 - **Acceptance criteria:**
   - Access gated by a **server-side role check** and a separate layout. **No client-side hiding** (AC16.1).
-  - Provides: market/marketplace reference view, fee/tax schedule management, ingestion upload and run history · match review queue with approve/override/reject · deal preview before publish · publish and retire · report queue · credit adjustment · predicted-vs-actual view grouped by score band (AC16.2, AC14.6).
+  - Provides: market/marketplace reference view, fee/tax schedule management, ingestion upload and run history · match review queue with approve/override/reject · **draft queue** with deal preview before publish · publish and retire · report queue · credit adjustment · predicted-vs-actual view grouped by score band (AC16.2, AC14.6).
+  - **Publish and retire call T20A. The console issues no `deals.status` write of its own** — the authorization decision lives in one server-side place, not behind a button. Retirement requires a reason from T20A's closed set, and the UI surfaces T20A's business-rule errors (an illegal transition, a pair that already has a live deal) as clear messages rather than a 500.
+  - The draft queue is the only surface where a non-active deal is visible, and it is admin-only.
   - **The match review UI surfaces the pack-size discrepancy from title and weight before publish** (AC4.5), prominently, using the `packSizeSuspicion` signal from T18. This is the single highest-value screen in the console.
   - Retiring a deal removes it from user feeds **within 60 seconds** (AC3.6).
   - Every admin credit adjustment writes a ledger row with reason `admin_adjust` and an actor reference (AC16.3).

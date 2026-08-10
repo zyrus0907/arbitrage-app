@@ -7,6 +7,19 @@ otherwise have to reverse-engineer. Per `TASKS.md` §0 rule 4, any deviation fro
 Format: context → decision → consequences. ADRs are append-only; a reversed
 decision gets a new ADR that supersedes the old one rather than an edit.
 
+> **Two numbering series exist and they are not the same series.** The
+> four-digit `ADR-0001…` records are *implementation* decisions, written by the
+> task that made them (T01 → onward). The three-digit `ADR-004…008` records are
+> *planning* decisions from the T03 post-completion review, written before the
+> tasks that implement them. `ADR-007` (planning: deal market-consistency) and
+> `ADR-0007` (implementation: functions are owner-only) are therefore different
+> decisions. Noted rather than renumbered, because both sets are referenced by
+> name from `TASKS.md`, `ARCHITECTURE.md` and existing migrations.
+>
+> **Going forward there is one series: the four-digit one.** The planning series
+> ended at `ADR-008`; every new ADR — whatever its origin — continues from
+> `ADR-0009`. That closes the collision rather than widening it.
+
 ---
 
 ## ADR-0001 — Next.js App Router, TypeScript strict, Tailwind, single deployable
@@ -465,3 +478,126 @@ If a client need for marketplace data emerges, expose a **view** with the specif
 - `ARCHITECTURE.md` §6.3 amended; this is the one place where v2.1 planning **narrows** a previously documented decision, and it is recorded here rather than changed silently.
 - T06 grants and T09 assertions both updated: `marketplaces` moves to the "privilege error expected" category.
 - If a later frontend task needs `capabilities` client-side, that is a design smell — capability-aware scoring (§8.7) happens server-side and ships its results in the redacted deal payload.
+
+---
+
+## ADR-0008 — Schema B: cross-market consistency by composite foreign key
+
+**Status:** Accepted · T04 · 2026-08-10 · implements ADR-007
+
+**Context.** ADR-007 requires that a `deals` row cannot reference a retailer
+product and a marketplace product that do not both belong to its market, that
+the rule hold on insert *and* update, and that it hold for bulk writes — T19's
+pipeline upserts in batches as the service role. It offers two mechanisms and
+prefers (a) denormalised parent keys plus composite foreign keys over (b) a
+`CONSTRAINT TRIGGER`, and asks that the choice be recorded.
+
+**Decision. Option (a).** `deals` carries two denormalised, `NOT NULL` scope
+keys — `retailer_id` and `marketplace_id` — and five foreign keys compose the
+two rules out of one-hop relationships that do exist:
+
+| Constraint | References | Asserts |
+|---|---|---|
+| `deals_retailer_product_fkey` | `retailer_products (id, retailer_id)` | the product belongs to that retailer |
+| `deals_retailer_market_fkey` | `retailers (id, market_id)` | the retailer belongs to the deal's market |
+| `deals_marketplace_product_fkey` | `marketplace_products (id, marketplace_id)` | the listing belongs to that marketplace |
+| `deals_market_marketplace_fkey` | `markets (id, marketplace_id)` | the market resolves to that marketplace |
+| `deals_market_currency_fkey` | `markets (id, currency)` | the deal is priced in its market's currency (§7.6) |
+
+Rows 1–2 compose ADR-007's rule 1; rows 3–4 compose rule 2. Row 5 extends the
+same technique Schema A already uses for `markets`, `retailers` and
+`marketplace_products` (ADR-0005 decision 4) to the table where a currency error
+would actually reach a user.
+
+Four composite `UNIQUE` constraints were added to Schema A tables to be
+referenceable: `retailers (id, market_id)`, `retailer_products (id,
+retailer_id)`, `markets (id, marketplace_id)`, `marketplace_products (id,
+marketplace_id)`. Each is *(primary key, one parent key)* and so is already
+implied by the primary key — it restricts nothing about what those tables may
+hold, and it needs **no new column on any T03 table**. The denormalisation lands
+on `deals`, which is where ADR-007 puts it.
+
+**Why not the trigger.** A foreign key is enforced by the same referential
+machinery on `INSERT`, `UPDATE`, `INSERT … ON CONFLICT DO UPDATE` and `COPY`,
+and cannot be turned off by `ALTER TABLE … DISABLE TRIGGER` or by
+`session_replication_role = replica` — both of which bulk-load and restore
+tooling uses. The failure is a plain `23503` that a pipeline already handles as
+a row-level error rather than a bespoke exception to parse. `COPY FROM STDIN` of
+a cross-market row was verified rejected by hand, because pgTAP cannot trap it:
+a failing `COPY` aborts the surrounding transaction, and `COPY FROM
+PROGRAM`/`FILE` needs a superuser, which neither the local stack nor a hosted
+Supabase project grants. The suite covers the paths that *can* be trapped —
+single insert, update, multi-row insert, `INSERT … SELECT` from a staging table,
+and both branches of an upsert — and additionally asserts the exact set of
+non-internal triggers on `deals` — `set_updated_at` and, after ADR-0009,
+`enforce_deal_lifecycle` — so the cross-market enforcement cannot quietly
+migrate into a trigger, and a third one cannot appear unannounced.
+
+**The load-bearing detail.** A composite foreign key is `MATCH SIMPLE`: if any
+referencing column is `NULL`, PostgreSQL skips the check entirely. `retailer_id`
+and `marketplace_id` being `NOT NULL` is therefore not tidiness — it is the
+constraint. `supabase/tests/database/schema_b.test.sql` asserts it directly.
+
+**Two further judgement calls, recorded so they are not mistaken for accidents.**
+
+1. **The same technique is applied to `watchlist_items` and `purchase_records`,
+   with no columns beyond the ones T04 enumerates.** `deals` gained three more
+   *(id, column)* unique keys so that a watchlist item cannot point at a listing
+   its deal is not about, and a purchase record cannot be attributed to a market
+   or a currency its deal does not use. Predicted-versus-actual is reported per
+   market and never pooled (§14.4), so a misattributed purchase row corrupts the
+   one number the MVP exists to measure.
+2. **The same technique is *not* applied to `fee_schedule_id`/`tax_schedule_id`,
+   nor to `barcode_lookups`.** Tying a deal's fee schedule to its marketplace is
+   the same class of correctness and is cheap, but T04's scope names exactly two
+   cross-market rules; the tax-schedule half would additionally need a
+   denormalised country code, so doing only the fee half would be an asymmetric
+   half-measure. `barcode_lookups` would need a denormalised `marketplace_id`
+   beyond T04's enumerated column set. Both are noted for T05A/T13 rather than
+   smuggled in here.
+
+**Consequences.** A cross-market or cross-currency deal is unrepresentable
+rather than merely rejected downstream, on every write path, including the bulk
+ones T19 has not been written yet. The cost is two denormalised columns that
+T19's writer must populate — it will fail loudly with `23502` if it does not —
+seven extra unique indexes across six tables, and the standing rule that the
+scope keys are immutable for a row's lifetime. A wholesale, internally
+consistent move of every scope key at once is still permitted, and is tested:
+the constraints forbid *disagreement*, not change.
+
+---
+
+## ADR-0009 — Deal lifecycle: draft → active → retired, with retirement terminal
+
+**Status:** Accepted · T04 · 2026-08-10 · product decision by the Product Manager · amends `ARCHITECTURE.md` §2.3
+
+**Context.** `ARCHITECTURE.md` §2.3 typed `deals.status` as `active | stale | retired`. T04 implemented that enum and immediately surfaced a contradiction it could not resolve on its own: `TASKS.md` T19 requires that "deals default to a non-published state" and `PRODUCT_SPEC.md` AC3.3 requires that "no ingested product becomes a user-visible deal without an explicit publish action by an admin" — and there was no unpublished state to default to. `stale`, meanwhile, was a state for something that is not a state: freshness is a function of `deals.expires_at` and `marketplace_products.refreshed_at`, both of which already exist.
+
+Raised at the T04 pre-push stop rather than patched around. The Product Manager resolved it.
+
+**Decision.**
+
+1. **`deal_status` is `draft | active | retired`.** `stale` is removed entirely.
+2. **`deals.status` is `NOT NULL DEFAULT 'draft'`**, and an INSERT in any other state is rejected. A newly computed deal is therefore invisible to users whatever the pipeline intends, and publication is always a later UPDATE.
+3. **Legal transitions:** `draft → draft`, `draft → active`, `draft → retired`, `active → active`, `active → retired`. **Retired is terminal** — `retired → active`, `retired → draft` and `active → draft` are rejected. A retired row's other columns may still be corrected; its state may not change.
+4. **Enforced by a `BEFORE INSERT OR UPDATE` row trigger** (`public.enforce_deal_lifecycle`), which also stamps `published_at`/`retired_at` when the caller leaves them absent and never touches the actor columns.
+5. **Audit columns on `deals`:** `published_at`, `published_by`, `retired_at`, `retired_by`, `retire_reason`. The actor columns reference `auth.users` with `ON DELETE SET NULL`.
+6. **Staleness is derived at read time**, never stored — no `stale` value, no boolean, no freshness column.
+7. **The pair unique index predicate becomes `status <> 'retired'`.** One *live* deal per pair; retired rows leave the index so history is kept and a replacement draft is always possible.
+
+**Why a trigger, when ADR-0008 argued for declarative constraints.** A transition rule compares OLD to NEW, and PostgreSQL has no declarative form for that — no assertions, no temporal constraints, and a CHECK cannot see the previous row. The choice was not "trigger versus foreign key" but "trigger versus nothing". The cross-market invariants remain declarative and unaffected; `deals` now carries exactly two user triggers, and a test asserts that so the cross-market rules cannot quietly migrate into one.
+
+**Why an INSERT must be `draft` rather than merely defaulting to it.** A default protects against forgetting; it does not protect against a service deciding it knows better, and AC3.3 is a promise to users that nothing unreviewed reaches them. With the insert restricted, the guarantee holds for the pipeline, for admin CSV loads, for a bulk `COPY`, and for anything written later by someone who has not read T19. The cost is that publication is always an UPDATE — which is what T20A does anyway.
+
+**Why `ON DELETE SET NULL` on the actor columns.** `CASCADE` would delete a deal because an admin closed their account, which is absurd. `RESTRICT` would block the account deletion AC1.5 promises. `SET NULL` keeps the fact and the timestamp, drops the personal linkage, and is the privacy-preserving answer as well as the operationally correct one.
+
+**What this decision deliberately does not do.** It does not enforce *who* may publish or retire. The database rejects transitions that are invalid for everyone; authorization belongs to **T20A**, added by this decision as the single sanctioned API for the two acts, and to **T33**, which calls it. A trigger that tried to read the current actor's role would put authorization in the one place it cannot be tested or reasoned about per request.
+
+**Consequences.**
+
+- **T19** inserts drafts, never publishes, retires an active deal that becomes hard-suppressed on recompute (`retire_reason = 'suppressed_on_recompute'`), and skips rejected matches.
+- **T20A** is new and blocks **T33**.
+- **T22/T29** filter on exactly `status = 'active'`; a retired deal remains reachable by a user who unlocked it (AC10.7).
+- **T24** must mark the underlying `product_matches` row rejected on a confirmed bad match (AC15.6), adding that marker in its own migration — otherwise the next recompute republishes the same error. `product_matches` has no rejection concept today, and T04 deliberately did not invent one for a workflow that does not exist yet.
+- **T27** asserts a pipeline run produces zero active deals.
+- One state transition per deal is now an auditable event rather than an inferred one, which is what makes AC3.9 measurable at all.

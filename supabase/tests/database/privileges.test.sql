@@ -67,12 +67,20 @@ select ok(
 -- B. The service role keeps exactly the four DML privileges
 -- ---------------------------------------------------------------------------
 
+-- Scoped to the eleven Schema A tables by name. Later tasks add tables and must
+-- assert their own posture in their own file (T04 does, in schema_b.test.sql);
+-- a bare count over the whole schema would have to be renumbered by every task,
+-- and an assertion that is routinely renumbered stops being read.
 select is(
   (select count(*)::int
      from information_schema.role_table_grants
     where table_schema = 'public'
       and grantee = 'service_role'
-      and privilege_type in ('SELECT', 'INSERT', 'UPDATE', 'DELETE')),
+      and privilege_type in ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+      and table_name in (
+        'currencies', 'countries', 'marketplaces', 'markets', 'tax_schedules',
+        'fee_schedules', 'profiles', 'retailers', 'retailer_products',
+        'marketplace_products', 'product_matches')),
   44,
   'service_role holds all four DML privileges on all eleven tables (11 x 4)');
 

@@ -352,6 +352,10 @@ Written as verifiable conditions. Given / When / Then where behavioural.
 - **AC3.4** Every ingestion run records rows in, rows upserted, rows failed, and per-row errors.
 - **AC3.5** At beta launch, at least **60 published, admin-verified live deals** exist in the chosen launch market, spanning at least 3 retailers and 4 marketplace categories.
 - **AC3.6** An admin can retire a live deal, and it disappears from all user feeds within 60 seconds. Users who already unlocked it retain access, with a "this deal has been retired" banner.
+- **AC3.7** **A newly computed deal is created in `draft` and is invisible to users.** No user-facing surface returns a deal that is not `active`. The computation pipeline never publishes: publication is a separate, explicit admin act. This is AC3.3 made structural rather than procedural — "nothing reaches a user unverified" must not depend on a service remembering.
+- **AC3.8** **Retirement is permanent.** A retired deal never returns to `draft` or `active`. Correcting a retired deal means computing a new one; the retired row remains as the record of what was shown and when. A user who unlocked it keeps access under AC3.6 and AC10.7.
+- **AC3.9** **Hard suppression on recompute retires the deal.** Where a recompute of an `active` deal newly trips a hard suppression rule (net profit ≤ 0, match confidence < 0.6, required inputs missing — AC7.5), the deal is retired with reason `suppressed_on_recompute` rather than left live or silently downgraded. A deal that no longer passes its own publication bar must stop being shown, and the reason must be recorded.
+- **AC3.10** Only one non-retired deal exists per retailer-product/marketplace-product pair at a time, so an admin reviewing the queue is never choosing between duplicate candidates for the same product.
 
 ---
 
@@ -489,6 +493,7 @@ Written as verifiable conditions. Given / When / Then where behavioural.
 - **AC15.3** Reports appear in an admin queue with the deal, the reporter, and the reason.
 - **AC15.4** An admin can confirm a report, which retires the deal and refunds the credit to every user who unlocked it, recorded in the ledger with reason `refund`.
 - **AC15.5** The refund policy is published and linked from the unlock button and the credits page.
+- **AC15.6** **A confirmed bad-match report marks the underlying product match rejected**, not just the deal retired. Retiring the deal alone is not enough: the match is what was wrong, and the next pipeline run would recompute the same deal from the same match and republish the same error. A rejected match is never used to create a deal again, and reversing that judgement is a deliberate admin act.
 
 ---
 
