@@ -601,3 +601,54 @@ Raised at the T04 pre-push stop rather than patched around. The Product Manager 
 - **T24** must mark the underlying `product_matches` row rejected on a confirmed bad match (AC15.6), adding that marker in its own migration — otherwise the next recompute republishes the same error. `product_matches` has no rejection concept today, and T04 deliberately did not invent one for a workflow that does not exist yet.
 - **T27** asserts a pipeline run produces zero active deals.
 - One state transition per deal is now an auditable event rather than an inferred one, which is what makes AC3.9 measurable at all.
+
+---
+
+## ADR-0010 — Financial records: reversal semantics, retention, and double-enforced ledger immutability
+
+**Status:** Accepted · T05 planning · 2026-08-10 · taken **before** T05 begins · amends `ARCHITECTURE.md` §2.3, §6.3, §9.2, §9.3, §11.2, §11.4, §11.5 · does not touch ADR-0009 or any T01–T04 outcome
+
+**Context.** T05 creates every table that money passes through — `credit_ledger`, `credit_purchases`, `credit_packs`, `credit_pack_prices`, `stripe_webhook_events` — and six questions were left open by `ARCHITECTURE.md` v2.0 in ways that only become expensive later:
+
+1. §9.2 rule 4 says a Stripe reversal "deducts credits", and §9.3 says a bad deal is refunded with `reason='refund'`. The reason enum has one value for both, so the ledger cannot distinguish "we were wrong" from "the payment was reversed" after the fact — and the sign cannot either, since `admin_adjust` may also be negative.
+2. §2.3 says "No UPDATE, no DELETE, ever", and §11.2 says a trigger enforces it — but the `service_role` our own server code runs as holds blanket table DML from ADR-0006, so the strongest statement in the schema was one `DROP TRIGGER` away from untrue.
+3. §11.5 specifies account deletion as a cascade from `auth.users`, which, applied to the ledger, would let a user delete the record of their own purchases and refunds.
+4. T08 seeds pack prices in week 2; T34 creates Stripe Prices in week 5. Nothing said what `stripe_price_id` holds in between.
+5. `stripe_webhook_events` was listed with `processed_at` and `error` — fields written *after* the row is inserted — while T06 was told to make the table reject UPDATE, which would break T35's fulfilment path.
+6. T06 was to create the ledger immutability trigger, one task after T05 creates the ledger, leaving a window where the source of truth for money is mutable.
+
+**Decisions.**
+
+**1. `refund` and `chargeback` are separate ledger reasons with opposite signs.** The enum becomes `signup_grant | purchase | unlock_deal | barcode_lookup | refund | chargeback | admin_adjust | promo`.
+
+- **`refund` — positive.** A credit restored to the user because the product was wrong (AC15.4). It is a quality event, counted by the "credit refunds issued" trust-damage signal (`PRODUCT_SPEC.md` §9.4).
+- **`chargeback` — negative.** Credits removed because Stripe reversed the payment that created them (`charge.refunded`, `charge.dispute.created`, AC17.5). It is a payment event, reconciled against Stripe, and it may drive the balance negative.
+
+Two reasons cost one enum value. One reason costs the ability to answer "are we shipping bad deals?" without joining to Stripe.
+
+**2. Financial records are `ON DELETE RESTRICT` and survive account deletion.** `credit_ledger.user_id` and `credit_purchases.user_id` restrict; the user-activity tables T04 built keep their cascades. Audit and reconciliation evidence that a user can delete by closing their account is not evidence, and a chargeback can arrive months later against an account that no longer exists.
+
+**3. `credit_ledger` immutability is enforced twice, and both layers are built in T05.** A `BEFORE UPDATE OR DELETE` trigger that raises unconditionally, **and** `REVOKE UPDATE, DELETE ON credit_ledger FROM service_role` so the role holds only `SELECT, INSERT`. The trigger is created in the same migration as the table, not in T06 — a table that holds money should never exist in a mutable state, not even for one migration. T06's job becomes verification.
+
+**4. `stripe_price_id` is nullable until T34, and placeholders are prohibited.** T08 seeds `NULL`. The safety is a read predicate, not a column constraint: `credit_pack_prices` is publicly readable only where `active = true AND stripe_price_id IS NOT NULL` (T06). A fake id like `price_TODO` would satisfy every not-null check and then fail at the Checkout call, which is the worst place to discover it.
+
+**5. Webhook event identity is immutable; its processing outcome is not.** `stripe_event_id`, `type`, `payload` and `received_at` are frozen by a restricted-UPDATE trigger (T06); `processed_at` and `error` are writable. `DELETE` is revoked from `service_role` in T05 — the row *is* the replay guard, and deleting one re-opens the duplicate-grant window.
+
+**6. `service_role`'s blanket table DML is narrowed per table where the table's own invariant requires it.** This is the first deviation from ADR-0006's uniform posture, and it is deliberate: `service_role` is not a trusted actor, it is the identity every server-side bug runs as.
+
+**Why not enforce immutability with the trigger alone.** A trigger is a schema object like any other: `DROP TRIGGER` is one line in a migration written by someone who found it inconvenient at 2am, and nothing else in the schema would notice. Revoking the privilege means the *default* posture of the role that runs all our code is "cannot do this", so the trigger becomes the backstop for privileged roles rather than the only wall.
+
+**Why not enforce it with the revoke alone.** A revoke says nothing about the migration owner, a support script connected as `postgres`, or a dashboard SQL session — exactly the contexts in which someone "just fixes one row". AC10.5 promises the *database* rejects it, not that our application happens not to try.
+
+**Why account deletion is not solved here.** Retention is a schema decision and belongs to T05, which creates the foreign keys. **De-identification is a product and privacy decision and belongs to T10**, which owns account deletion and must test the result. The two are not the same choice, and picking the second one now — a tombstone profile, a surrogate subject id, a nulled actor column — would fix the FK shape, the reconciliation query and the privacy claim from the task least able to evaluate them. T10 records its choice as its own ADR.
+
+**Consequences.**
+
+- **T05** creates the ledger trigger, applies both revokes, and adds the constraints (`idempotency_key NOT NULL UNIQUE`, `delta <> 0`, `balance_after NOT NULL` and signed, `credits > 0`, `amount_minor > 0`, currency FKs) and the eight required indexes. Its tests must distinguish a privilege failure from a trigger failure, which means exercising the trigger as a role that holds the privilege.
+- **T06** verifies the ledger protections instead of creating them, and adds the restricted-UPDATE trigger to `stripe_webhook_events`. Its `credit_pack_prices` policy predicate gains `AND stripe_price_id IS NOT NULL`.
+- **T07**'s `grant_credits` writes `chargeback` rows as well as `refund` rows; both are inserts, so the revoke does not constrain it. The RPCs are `SECURITY DEFINER` and run as owner, so the ledger revoke on `service_role` does not affect them — that is the intended shape, not a loophole: the only sanctioned write path stays open and every unsanctioned one closes. **One implementation constraint follows for T07:** the idempotency check in §6.5's sketch must resolve as `ON CONFLICT DO NOTHING` plus a read of the existing row, never `ON CONFLICT DO UPDATE` — an upsert on `credit_ledger` is an UPDATE and the append-only trigger will raise on it, correctly.
+- **T08** seeds `stripe_price_id` as `NULL`. **No pack price is publicly readable until T34 populates it** — the credits page will show no purchasable pack before then, which is correct and should not be "fixed" with a placeholder.
+- **T09**'s privilege suite must assert the narrowed per-table posture, not a blanket `service_role` DML grant, or the revokes regress silently.
+- **T10** owns account-deletion pseudonymisation and must record it as its own ADR. Until it lands, deleting a user with ledger rows fails with `23503` — including via `auth.users`, because `profiles` cascades from it.
+- **T35** deducts with reason `chargeback`, and its per-currency reconciliation can now separate payment reversals from product refunds without leaving the database.
+- **`PRODUCT_SPEC.md`** gains AC1.6 (financial retention) and sharpened AC15.4 / AC17.5 / AC21.4.

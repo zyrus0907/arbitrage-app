@@ -2,7 +2,7 @@
 
 **Project:** Global Retail-to-Marketplace Arbitrage App
 **Document owner:** Technical Project Manager
-**Version:** 2.2 — global-first, marketplace-agnostic, Amazon-first MVP
+**Version:** 2.3 — global-first, marketplace-agnostic, Amazon-first MVP
 **Source documents:** `ARCHITECTURE.md` v2.0 (technical contract) · `PRODUCT_SPEC.md` v2.0 (scope contract)
 **Status:** In execution. **T01–T04 complete.** Next task: T05.
 
@@ -44,6 +44,17 @@ A **product decision** taken during T04, when the schema work surfaced that `ARC
 - **Added T20A** — admin deal lifecycle API (publish/retire). Depends on T19 and T20, blocks T33.
 - Propagated into T19 (drafts only, never publishes, auto-retires on suppression, skips rejected matches), T22 and T29 (feed predicate is exactly `status = 'active'`), T24 (a confirmed bad match marks `product_matches` rejected), T27 (the pipeline test proves zero active deals without an admin publish) and T33 (publish/retire call T20A).
 - Added AC3.7–AC3.10 and AC15.6 to `PRODUCT_SPEC.md`.
+
+## Changelog: v2.2 → v2.3
+
+T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **No product scope changed. No priority changed. No task was removed.** T01–T04 and the ADR-0009 deal lifecycle (`draft | active | retired`) are untouched.
+
+- **`chargeback` added to the credit reason enum**, and the two reversal reasons are separated: `refund` is a **positive** restoration (confirmed bad deal), `chargeback` is a **negative** Stripe reversal/clawback.
+- **`credit_ledger` immutability is enforced twice and owned by T05** — the append-only trigger *and* `REVOKE UPDATE, DELETE FROM service_role`. T06 now **verifies** it rather than creating a second trigger.
+- **`stripe_webhook_events` is explicitly not immutable.** Identity, type, payload and `received_at` are frozen; `processed_at` and `error` are writable. The restricted-UPDATE trigger is T06's; `DELETE` is revoked from `service_role` in T05.
+- **Financial records survive account deletion.** `credit_ledger.user_id` and `credit_purchases.user_id` are `ON DELETE RESTRICT`. T10's account deletion becomes pseudonymisation of retained financial rows; **the mechanism is left as an explicit T10 decision.**
+- **`stripe_price_id` is nullable and seeded NULL** (T05, T08) because T08 runs weeks before T34. Placeholder Stripe IDs are prohibited. T06's public-read predicate for `credit_pack_prices` becomes `active = true AND stripe_price_id IS NOT NULL`.
+- T05 gained explicit column constraints (`idempotency_key NOT NULL UNIQUE`, `delta <> 0`, `balance_after NOT NULL`, money/currency invariants, `credits > 0`, `amount_minor > 0`), an explicit index list, a no-PII rule on `app_events.properties`, and an acceptance test list that distinguishes privilege failures from trigger failures.
 
 ---
 
@@ -229,21 +240,83 @@ A **product decision** taken during T04, when the schema work surfaced that `ARC
 
 ## T05 — Schema C: credits, multi-currency billing and operational logs
 
-- **Goal:** Create the currency-neutral credit ledger, per-currency pack pricing, and market-aware operational logs.
+- **Goal:** Create the currency-neutral credit ledger, per-currency pack pricing, and market-aware operational logs — with ledger immutability and financial-record retention established here rather than deferred.
 - **Agent:** Database Engineer
 - **Dependencies:** T03
 - **Files / areas:** `supabase/migrations/*_schema_c.sql`, `src/types/database.ts`
 - **Acceptance criteria:**
-  - `credit_ledger` per ARCHITECTURE.md v2.0 with append-only deltas, `balance_after`, reason enum and unique `idempotency_key`.
-  - `credit_purchases` stores `amount_minor` and `currency`.
-  - Split credit packs into `credit_packs` (credit quantity/value) and `credit_pack_prices` (currency, amount_minor, Stripe Price ID), unique per `(credit_pack_id, currency)`.
-  - `stripe_webhook_events.stripe_event_id` is the PK.
+
+  **`credit_ledger` — the source of truth for money**
+  - Columns per ARCHITECTURE.md §2.3: `id`, `user_id`, `delta`, `reason`, `ref_type`, `ref_id`, `balance_after`, `idempotency_key`, `created_at`.
+  - **The `reason` enum is `signup_grant | purchase | unlock_deal | barcode_lookup | refund | chargeback | admin_adjust | promo`.** `chargeback` is added in v2.3 (ADR-0010), and the two reversal reasons are **not** interchangeable:
+    - **`refund` is a positive restoration** — a credit given back to the user, typically after a confirmed bad deal (AC15.4). `delta > 0`.
+    - **`chargeback` is a negative clawback** — credits removed because Stripe reversed the payment that created them (`charge.refunded`, `charge.dispute.created` — AC17.5, §9.2). `delta < 0`, and the resulting balance may go negative.
+    - Collapsing the two would make the "credit refunds issued" trust-damage metric (`PRODUCT_SPEC.md` §9.4) count payment disputes as product goodwill, and would leave the T35 reconciliation unable to distinguish a product failure from a payment failure. The sign is not sufficient to tell them apart later: an `admin_adjust` can also be negative.
+  - **`idempotency_key` is `NOT NULL` and `UNIQUE`.** Nullable would defeat the guard entirely — several NULLs do not conflict in a unique index, so every unkeyed write would pass. T07's "same key twice charges once" and T35's exactly-once webhook fulfilment both rest on this column being mandatory.
+  - **`CHECK (delta <> 0)`.** A zero-delta row is either a bug or a no-op that silently consumes an idempotency key.
+  - **`balance_after` is `NOT NULL` and may be negative** — AC17.5 requires a chargeback to take the balance below zero rather than erase history. No non-negative check.
+  - **`created_at timestamptz NOT NULL DEFAULT now()`.**
+  - **`user_id` references `profiles (id)` `ON DELETE RESTRICT`** — deliberately not the `ON DELETE CASCADE` that T04 uses for user activity tables. Financial history is retained for audit and reconciliation and does not belong to the user's personal-data footprint in the way a watchlist item does (ADR-0010). **Consequence, stated so it is not discovered in T10:** because `profiles.id` cascades from `auth.users`, a plain `delete from auth.users` will fail with `23503` while any ledger row exists. Account deletion therefore becomes a pseudonymisation problem, owned by T10 — this task does not invent that mechanism.
+  - **Append-only, enforced at two independent layers:**
+    - (a) A `BEFORE UPDATE OR DELETE` row trigger on `credit_ledger` that raises unconditionally. **This trigger is created here, in T05** — not in T06. It belongs with the table it protects, so the table is never reachable in a mutable state, not even between two migrations.
+    - (b) **`REVOKE UPDATE, DELETE ON public.credit_ledger FROM service_role`**, so the role our own server code runs as holds only the ledger privileges it actually needs: `SELECT` and `INSERT`. This is a deliberate narrowing of the blanket table-DML grant ADR-0006 established, and the migration header says so.
+    - Neither layer makes the other redundant: the revoke stops our own admin client and anything holding the service-role key; the trigger stops a role that *does* hold UPDATE (the migration owner, a future support script, a dashboard session). AC10.5 says the database rejects it — one layer would leave that true only by accident of privilege.
+  - Index `(user_id, created_at desc)`.
+
+  **`credit_purchases`**
+  - **`user_id` references `profiles (id)` `ON DELETE RESTRICT`**, for the same reason as the ledger: purchase history is reconciliation evidence against Stripe.
+  - Nullable **`credit_pack_price_id`** FK → `credit_pack_prices (id)`, recording *which* per-currency price the purchase was made at. Nullable because a price row can be retired and because manual/admin grants have no price row.
+  - Nullable **`stripe_customer_id`**.
+  - **`stripe_payment_intent_id` is nullable and `UNIQUE`** — absent until Stripe confirms, and never shared by two purchases once present.
+  - **`credits`, `amount_minor` and `currency` are immutable purchase snapshots**, not lookups: what the user bought and paid, frozen at purchase time, so re-pricing a pack later cannot rewrite what was sold. `status` and `completed_at` remain mutable — the row records a process, and only these fields describe its progress.
+  - Project money/currency invariants apply: `amount_minor bigint`, `currency` FK → `currencies` and `NOT NULL` alongside it, `CHECK (amount_minor > 0)` (§11.2 — a currency-free or currency-ambiguous amount must be impossible at the storage layer).
+  - `stripe_checkout_session_id` `UNIQUE`.
+
+  **`credit_packs` / `credit_pack_prices`**
+  - Split as before: `credit_packs` carries the credit quantity/value, `credit_pack_prices` carries `(currency, amount_minor, stripe_price_id, active)`, unique per `(credit_pack_id, currency)`.
+  - **`CHECK (credit_packs.credits > 0)`** and **`CHECK (credit_pack_prices.amount_minor > 0)`**. A free or negative pack is not a product.
+  - `credit_pack_prices.currency` is an FK to `currencies` and `NOT NULL`.
+  - **`stripe_price_id` is nullable**, because **T08 seeds pack prices weeks before T34 creates anything in Stripe**. A `NOT NULL` column here would force T08 to invent a placeholder, and a fake Stripe ID that reaches a Checkout call fails at the worst possible moment. T06 makes the nullability safe rather than merely tolerated: a price is publicly readable only when `active = true AND stripe_price_id IS NOT NULL`.
+
+  **`stripe_webhook_events`**
+  - `stripe_event_id` is the PK (the first of the two idempotency layers, AC17.3).
+  - Records `type`, `payload jsonb`, **`received_at` (`NOT NULL DEFAULT now()`)**, **`processed_at` (nullable — null means received but not yet fulfilled)**, and `error`.
+  - **This row is deliberately *not* immutable.** Unlike the ledger, it describes a process with an outcome that is written after the fact. T05 creates it plainly mutable; **T06 adds the restricted UPDATE protection** permitting changes to **`processed_at` and `error` only**, with `stripe_event_id`, `type`, `payload` and `received_at` immutable. Do not add a blanket immutability trigger here — it would make the table unusable by T35 and would be removed by the next task.
+  - **`REVOKE DELETE ON public.stripe_webhook_events FROM service_role`.** Nothing in the design deletes an event: the row *is* the replay protection, and deleting one re-opens the duplicate-grant window. Consistent with the same narrowing applied to `credit_ledger`; `INSERT`, `SELECT` and `UPDATE` remain.
+
+  **Operational logs**
   - `api_usage_log` records provider, `marketplace_id`, endpoint, units/tokens, estimated cost, cost currency, status and latency.
   - `ingestion_runs` includes `market_id`.
   - `app_events` includes `market_id`.
-  - RLS enabled, no policies yet.
-  - **Privilege posture — new in v2.1 (ADR-004, global rule 8):** no privileges granted to `anon` or `authenticated` by this migration; `service_role` receives table DML only; any Postgres or Supabase default grant on the new tables **and their sequences** is revoked in the same migration; the migration states its posture in a header comment. This applies to `credit_packs` and `credit_pack_prices` too — their public-read grants belong to T06, alongside their policies, not here.
-- **Testing requirements:** Duplicate ledger idempotency key and Stripe event IDs are rejected. A pack can have GBP and USD prices without duplicating the pack itself. Regenerate `src/types/database.ts` against the remote database and commit it.
+  - **`app_events.properties` is documented, in a column comment, as carrying no PII** — no email address, no name, no free text typed by a user, no raw barcode. It is an event-shape bag for funnel questions (§9.3), it is the least governed column in the schema, and "GDPR-grade baseline for everyone" (§11.5) is not maintainable if arbitrary personal data can arrive here through a helper someone wrote in T25. The rule is written where the next author will see it.
+
+  **Indexes — required explicitly, not left to judgement**
+  - `credit_ledger (user_id, created_at desc)`
+  - `credit_purchases (user_id, created_at desc)`
+  - `credit_purchases (status)`
+  - `api_usage_log (provider, created_at desc)`
+  - `api_usage_log (marketplace_id, created_at desc)`
+  - `ingestion_runs (market_id, started_at desc)`
+  - `app_events (event, created_at desc)`
+  - `app_events (user_id, created_at desc)`
+
+  **Privilege posture — v2.1 (ADR-004, global rule 8), narrowed in v2.3 (ADR-0010)**
+  - No privileges granted to `anon` or `authenticated` by this migration; any Postgres or Supabase default grant on the new tables **and their sequences** is revoked in the same migration; the migration states its posture in a header comment. This applies to `credit_packs` and `credit_pack_prices` too — their public-read grants belong to T06, alongside their policies, not here.
+  - `service_role` receives table DML **except** where narrowed above: **no `UPDATE` or `DELETE` on `credit_ledger`, no `DELETE` on `stripe_webhook_events`.** The header comment names both narrowings and why, so a later "restore the standard grants" migration cannot undo them by looking tidy.
+  - RLS enabled on every new table, no policies yet.
+- **Testing requirements:** pgTAP tests in `supabase/tests/database/` proving:
+  - **`service_role` cannot UPDATE `credit_ledger`** — asserted as a *privilege* error.
+  - **`service_role` cannot DELETE `credit_ledger`** — asserted as a *privilege* error.
+  - **The append-only trigger independently rejects UPDATE and DELETE when exercised as a role that holds the privilege** (the migration owner, not `service_role`), so the test proves the trigger fires rather than re-proving the revoke. A test that only ever runs as `service_role` cannot tell the two mechanisms apart, and would pass unchanged if the trigger were dropped.
+  - `delta = 0` is rejected.
+  - A NULL `idempotency_key` is rejected; a duplicate `idempotency_key` is rejected.
+  - Duplicate `stripe_event_id` is rejected.
+  - **Deleting a user who has ledger rows is rejected** (`23503` from `ON DELETE RESTRICT`), asserted against `profiles` and against `auth.users`, since the cascade makes the second path fail too.
+  - A `credit_pack_prices` row with `stripe_price_id IS NULL` is valid, and readable by `service_role`.
+  - The money/currency constraints hold: a negative or zero `amount_minor`, a zero-or-negative `credits`, and an amount without a valid `currency` FK are each rejected.
+  - A pack can have GBP and USD prices without duplicating the pack itself.
+  - The privileges test asserts the **narrowed** per-table posture, not a blanket `service_role` DML grant — otherwise the revokes above regress silently.
+  - Regenerate `src/types/database.ts` against the remote database and commit it.
 - **Priority:** P0
 
 ---
@@ -296,15 +369,17 @@ A **product decision** taken during T04, when the schema work surfaced that `ARC
 
   **Public reference tables** (`anon, authenticated`, `SELECT` only, active rows only):
   - `countries`, `currencies`, `markets` (active/live rows only): policy + `GRANT SELECT`.
-  - `credit_packs` and active `credit_pack_prices`: policy + `GRANT SELECT`.
+  - `credit_packs`: policy + `GRANT SELECT`, active rows only.
+  - **`credit_pack_prices`: the policy predicate is `active = true AND stripe_price_id IS NOT NULL`** (new in v2.3, ADR-0010). `stripe_price_id` is nullable until T34 populates it (T05, T08), and a price with no Stripe Price ID cannot be bought — surfacing one produces a pricing page whose button leads to a checkout that cannot be created. The database refuses to show an unbuyable price rather than trusting every future caller to filter for it.
   - **`marketplaces` is removed from the public-read set (new in v2.1, ADR-008).** It carries `adapter_key` and `capabilities`, which are integration internals. Nothing in the MVP client needs it: the feed is market-scoped server-side, and currency formatting needs `currencies` and `markets` only. Neither PRODUCT_SPEC nor ARCHITECTURE requires client access to it. If a client need emerges later, expose a view with the specific columns required — do not grant the table.
 
   **Service-role-only tables** — `deals`, `retailer_products`, `marketplace_products`, `product_matches`, `tax_schedules`, `fee_schedules`, `credit_purchases`, `stripe_webhook_events`, `api_usage_log`, `ingestion_runs`, `app_events`:
   - **No policies and no `anon`/`authenticated` grants of any kind.** Stated explicitly in the migration rather than left implicit, so a reviewer can see the decision was made.
 
-  **Immutability:**
-  - Triggers on `credit_ledger` and `stripe_webhook_events` raise on UPDATE and DELETE (AC10.5).
-- **Testing requirements:** T09 covers this formally, but this task ships its own SQL smoke tests proving: (a) the ledger rejects an UPDATE and a DELETE **from the service role itself**; (b) for one representative public-read table and one representative user-owned table, the `authenticated` role can actually read the rows it should — a policy that is inert for want of a grant must fail here, not at T09.
+  **Immutability — revised in v2.3 (ADR-0010), because the two tables need different rules:**
+  - **`credit_ledger`: verify, do not re-create.** The append-only trigger and the `REVOKE UPDATE, DELETE … FROM service_role` are built in **T05**, with the table they protect. This task asserts both are still in place and does **not** add a second trigger — two triggers with the same purpose means one of them can be dropped without any test going red.
+  - **`stripe_webhook_events`: add restricted UPDATE protection, not immutability.** A `BEFORE UPDATE` trigger permits changes to **`processed_at` and `error` only**; any change to `stripe_event_id`, `type`, `payload` or `received_at` raises. The row records event identity *and* processing outcome: the identity is evidence and must never move, the outcome is written after the fact by T35 and must be writable. A blanket immutability trigger here would break webhook fulfilment. `DELETE` is already revoked from `service_role` in T05; the trigger additionally rejects DELETE for any role that holds the privilege.
+- **Testing requirements:** T09 covers this formally, but this task ships its own SQL smoke tests proving: (a) the T05 ledger protections are intact — `service_role` UPDATE/DELETE fails with a privilege error, and the trigger still rejects UPDATE/DELETE for a role that holds the privilege; (b) `stripe_webhook_events` accepts an UPDATE that sets `processed_at` and `error`, and rejects one that changes `payload`, `type`, `stripe_event_id` or `received_at`; (c) a `credit_pack_prices` row with `stripe_price_id IS NULL` is **not** visible to `anon`, while an active row with a Stripe Price ID is; (d) for one representative public-read table and one representative user-owned table, the `authenticated` role can actually read the rows it should — a policy that is inert for want of a grant must fail here, not at T09.
 - **Priority:** P0
 
 ---
@@ -342,6 +417,7 @@ A **product decision** taken during T04, when the schema work surfaced that `ARC
   - Seed the chosen launch market's verified tax schedule and Amazon marketplace fee schedule, including source URLs and verification dates.
   - Fee schedules use generic referral rules, fulfilment bands, storage rules and `surcharges`; **no hard-coded digital-services-fee column is required**.
   - Seed at least three credit packs and per-currency `credit_pack_prices` for the launch currency. Other-currency prices may remain inactive until those markets open.
+  - **Seed `stripe_price_id` as `NULL` on every pack price, and never a placeholder** (new in v2.3, ADR-0010). Stripe Prices do not exist until T34; a made-up value such as `price_TODO` or `price_test_123` is worse than a NULL in three ways — it passes any `IS NOT NULL` check, it is indistinguishable from a real ID on inspection, and it reaches Stripe as a 400 at checkout rather than failing at seed time. T06's public-read predicate (`active = true AND stripe_price_id IS NOT NULL`) means NULL-priced rows are simply invisible to clients until T34 fills them in, which is the correct behaviour for a pack that cannot yet be bought.
   - Seed 3–5 retailers in the chosen launch market with `source_type = 'curated'`.
   - Seed is idempotent.
   - **`fx_rates` is out of MVP scope (ADR-005).** The table is not created and not seeded. The MVP is single-currency per deal (§7.6, AC2.7) and there is no MVP consumer; it arrives in Phase 3 with the first genuine cross-border or multi-currency reporting requirement. Do not create it "for later".
@@ -394,8 +470,12 @@ A **product decision** taken during T04, when the schema work surfaced that `ARC
   - Money inputs use the active market currency; values are stored as integer minor units with explicit currency. No currency symbol or ×100 assumption is hard-coded.
   - `GET/PATCH /api/v1/profile` is Zod-validated and updates only the caller's own row.
   - Signup grants 5 credits via `grant_credits` with reason `signup_grant` (AC10.6).
-  - Account deletion available in settings, cascading personal rows (AC1.5).
-- **Testing requirements:** Integration tests for redirect-and-return, profile update authorisation (user A cannot PATCH user B), and the signup grant landing in the ledger exactly once. Manual: complete onboarding in under 60 seconds on a mid-range Android phone (AC2.4) and record the timing in the PR.
+  - **Account deletion available in settings (AC1.5) — revised in v2.3 (ADR-0010).** Personal rows cascade as before. **Financial records do not.**
+    - `credit_ledger` and `credit_purchases` are **retained** for audit and reconciliation, and their `user_id` foreign keys are `ON DELETE RESTRICT` (T05). They are not cascade-deleted, not soft-deleted, and not excluded from the nightly reconciliation (AC10.8, §11.4) afterwards.
+    - **This makes a plain `delete from auth.users` fail** with `23503` for any user who ever held a credit — which is every user, since signup grants five. Account deletion in this product is therefore **pseudonymisation of the retained financial rows plus deletion of everything else**, not a cascade.
+    - **The pseudonymisation mechanism is an explicit T10 decision and is deliberately not specified here.** Whether the retained rows point at a tombstone profile, a surrogate subject id, or a nulled actor column — and what happens to `auth.users` itself — changes the FK shape, the reconciliation query and the privacy claim in the same stroke, and choosing it in advance of the task that must live with it is how a wrong answer gets inherited. T10 chooses, records it as its own ADR, and writes the migration that implements it.
+    - Whatever T10 chooses must satisfy three constraints simultaneously: the user's personal data is gone, the financial history still sums to the same totals per currency, and no retained row can be traced back to a person through this database.
+- **Testing requirements:** Integration tests for redirect-and-return, profile update authorisation (user A cannot PATCH user B), and the signup grant landing in the ledger exactly once. A deletion test asserting that personal rows are gone, that the ledger and purchase rows survive with the same deltas and totals, and that nothing in the retained rows identifies the deleted user. Manual: complete onboarding in under 60 seconds on a mid-range Android phone (AC2.4) and record the timing in the PR.
 - **Priority:** P0
 
 ---
@@ -919,10 +999,13 @@ A **product decision** taken during T04, when the schema work surfaced that `ARC
   - **Stripe Checkout (hosted) only.** No Elements, no custom card form, no saved-card UI, no PCI surface.
   - Server resolves user/market currency, validates the pack and active currency price, creates a `credit_purchases` row with status `pending`, then creates the Checkout Session with `client_reference_id = userId` and metadata `{ userId, packId, purchaseId }`.
   - **Credit quantity is read from `credit_packs`; amount and Stripe Price ID are read server-side from `credit_pack_prices` for the user's resolved currency.** No client-supplied price or quantity is ever trusted (AC17.4).
+  - **Stripe setup is part of this task: create the Stripe Prices and backfill `credit_pack_prices.stripe_price_id` for every pack price that is to be active** (new in v2.3, ADR-0010). T08 seeded these as `NULL` because no Stripe object existed yet, and placeholders were prohibited. Populating them is therefore a real step with a migration or a seed-update script behind it, not an assumption — and it is the step that makes the credits screen non-empty.
+  - **Until `stripe_price_id` is non-null, a pack price is invisible to `anon` and `authenticated`.** T06's read policy is `active = true AND stripe_price_id IS NOT NULL`, so an unbackfilled price is not merely unbuyable, it is unreadable — the credits screen will render no purchasable pack at all. That is the intended behaviour and must not be "fixed" by relaxing the policy or by writing a placeholder ID: the correct fix is always to create the Stripe Price and backfill the real value.
+  - Verify after backfill that each intended pack price is readable with the **anon key**, not only with the service role. A row that is correct in the database and filtered out by the policy looks identical to a missing row from the client's side.
   - Credits screen shows balance, packs, and full ledger history with reasons (F20).
   - Success page **polls the balance** rather than asserting success from the redirect (AC17.6).
   - Test mode throughout; live keys are a separate deployment step in T39.
-- **Testing requirements:** Test that tampered client currency/price/credit count is ignored in favour of server-resolved market currency and database values. Test that an inactive pack is rejected. Manual: complete a test-mode purchase end to end.
+- **Testing requirements:** Test that tampered client currency/price/credit count is ignored in favour of server-resolved market currency and database values. Test that an inactive pack is rejected. Test that a pack price with a NULL `stripe_price_id` is never offered for checkout and never appears in an anon-key read. Manual: complete a test-mode purchase end to end, and confirm the credits screen lists exactly the backfilled pack prices and no others.
 - **Priority:** P0 (late)
 
 ---
@@ -1125,36 +1208,36 @@ A **product decision** taken during T04, when the schema work surfaced that `ARC
 
 # NEXT 5 TASKS TO EXECUTE
 
-**Completed:** T01 (repo, CI, deploy) · T02 (Supabase, clients, migrations) · T03 (11 core tables, 9 enums, RLS enabled, privileges normalised — ADR-004).
+**Completed:** T01 (repo, CI, deploy) · T02 (Supabase, clients, migrations) · T03 (11 core tables, 9 enums, RLS enabled, privileges normalised — ADR-004) · T04 (deals, user activity, cross-market consistency by composite FK — ADR-0008; deal lifecycle `draft | active | retired` — ADR-0009).
 
-Give these to coding agents in this exact order. Do not start one until the previous task's acceptance criteria are verified.
+**Next task: T05.** Give these to coding agents in this exact order. Do not start one until the previous task's acceptance criteria are verified.
 
-### 1. T04 — Market-scoped deals and user activity schema
+### 1. T05 — Credits, per-currency billing and operational logs
 **Agent:** Database Engineer · **Depends on:** T03  
-Create the central `deals` model plus unlock/watchlist/purchase/barcode records, all market- and currency-aware, with declarative cross-market consistency enforcement and the full column set enumerated in the task.  
-*Why first:* feed isolation, pricing snapshots and future marketplace support depend on getting the read model right now — and a cross-market deal is a user in one country seeing another country's price.
+Create the append-only ledger, currency-neutral packs, per-currency pack prices, webhook events and market/provider operational logs. Ledger immutability (trigger **and** revoked `service_role` privileges) and financial-record retention (`ON DELETE RESTRICT`) are built here, per ADR-0010.  
+*Why first:* this makes credits global without making every unlock price country-specific — and the source of truth for money must never exist in a mutable state, not even for one migration.
 
-### 2. T05 — Credits, per-currency billing and operational logs
-**Agent:** Database Engineer · **Depends on:** T03  
-Create the append-only ledger, currency-neutral packs, per-currency pack prices, webhook events and market/provider operational logs.  
-*Why second:* this makes credits global without making every unlock price country-specific.
-
-### 3. T05A — Temporal integrity constraints on versioned schedules
+### 2. T05A — Temporal integrity constraints on versioned schedules
 **Agent:** Database Engineer · **Depends on:** T03 · **Blocks:** T08  
 Exclusion constraints preventing overlapping effective ranges on `tax_schedules` (per country) and `fee_schedules` (per marketplace), with `[)` semantics and correct open-ended handling.  
-*Why third:* it must exist before T08 seeds a single schedule row, and it permanently removes a class of silent, market-wide wrongness (risks #2 and #3).
+*Why second:* it must exist before T08 seeds a single schedule row, and it permanently removes a class of silent, market-wide wrongness (risks #2 and #3).
 
-### 4. T06 — RLS policies, SQL grants and append-only enforcement
+### 3. T06 — RLS policies, SQL grants and append-only enforcement
 **Agent:** Database Engineer · **Depends on:** T03, T04, T05, T05A  
-Every policy paired with its minimum matching grant, every grant paired with its policy, service-role-only tables explicitly granted nothing, ledger immutability enforced by trigger.  
-*Why fourth:* after T03's normalisation, a policy without a grant is inert and a grant without a policy is a leak. This is the task where that correspondence is established for the whole schema.
+Every policy paired with its minimum matching grant, every grant paired with its policy, service-role-only tables explicitly granted nothing. Verifies the T05 ledger protections rather than duplicating them, and adds restricted-UPDATE protection to `stripe_webhook_events` (ADR-0010).  
+*Why third:* after T03's normalisation, a policy without a grant is inert and a grant without a policy is a leak. This is the task where that correspondence is established for the whole schema.
 
-### 5. T07 — Atomic credit RPCs (`spend_credits`, `grant_credits`)
+### 4. T07 — Atomic credit RPCs (`spend_credits`, `grant_credits`)
 **Agent:** Database Engineer · **Depends on:** T05, T06  
 Race-free, idempotent, `SECURITY DEFINER`, with `EXECUTE` revoked from `PUBLIC`/`anon`/`authenticated` and granted only to `service_role`.  
-*Why fifth:* every later money path depends on this being the only way credits move.
+*Why fourth:* every later money path depends on this being the only way credits move.
 
-**After these five:** T08 (global seed + one launch market) → T09 (RLS/privilege QA) → T10 (auth/onboarding) → T11 (security review).  
+### 5. T08 — Seed data: global reference data and one launch market
+**Agent:** Database Engineer · **Depends on:** T03, T04, T05, T05A  
+Currencies, countries, Amazon locales, exactly one live market with verified tax and fee schedules, retailers, credit packs and per-currency pack prices — with `stripe_price_id` seeded `NULL` and no placeholders (ADR-0010). Plus `docs/MARKET_PLAYBOOK.md` and the synthetic-second-market proof.  
+*Why fifth:* it is the first task that proves the global-first claim, and it cannot run before T05A without risking committing the exact overlap the constraint exists to prevent.
+
+**After these five:** T09 (RLS/privilege QA) → T10 (auth/onboarding, including the account-deletion pseudonymisation decision ADR-0010 leaves open) → T11 (security review).  
 Do not begin the deal engine until T11 has no open P0 findings.
 ---
 

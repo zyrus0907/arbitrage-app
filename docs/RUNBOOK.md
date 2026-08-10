@@ -405,4 +405,53 @@ where n.nspname = 'public' and c.relrowsecurity
 | Table readable by anon that should not be | Grant present, policy missing or permissive | Redaction bypass — the paid product given away |
 | RLS test passes but protects nothing | Test asserted "zero rows" when the real cause was a privilege error | T09 — assertions must name the expected mechanism |
 | Credits mintable from the client | `CREATE OR REPLACE` on a `SECURITY DEFINER` function without re-revoking `PUBLIC` | T07, and any later RPC change |
- 
+
+---
+
+## Migration checklist — financial tables
+
+**Applies to any migration that creates or alters `credit_ledger`, `credit_purchases`, `credit_packs`, `credit_pack_prices`, `stripe_webhook_events`, or any future table holding money, credits or payment identity.** This checklist is *in addition to* the privilege-posture checklist above, not instead of it. Established by ADR-0010 (T05 planning) and binding from T05 onward.
+
+The failure mode this exists to prevent is specific: financial defects are silent. A wrong fee is visible to the user; a mutable ledger row, a missing idempotency constraint or a cascade that deletes a purchase record shows up as nothing at all until a reconciliation disagrees months later, and by then the evidence needed to work out what happened is the evidence that was destroyed.
+
+### 1. Append-only and immutability
+
+- [ ] For every append-only table, **both** layers are present: a `BEFORE UPDATE OR DELETE` trigger that raises, **and** the corresponding privilege revoked from `service_role`. One without the other is half a guarantee (ADR-0010).
+- [ ] The trigger is created in the **same migration as the table**, not a later hardening pass. A money table must never exist in a mutable state, not even between two migrations.
+- [ ] For a table that is *restricted* rather than immutable (`stripe_webhook_events`), the migration names **which columns may change** and rejects changes to all others. Identity and payload frozen; processing outcome writable.
+- [ ] No second trigger duplicating a guarantee an earlier migration already makes. Two triggers with one purpose means either can be dropped with no test going red.
+- [ ] The tests distinguish the **mechanism**: a privilege error and a trigger exception are different failures. Exercise the trigger as a role that *holds* the privilege (the migration owner), or the test only re-proves the revoke.
+
+### 2. Foreign key delete behaviour
+
+- [ ] Every FK on the table states its delete behaviour explicitly. `CASCADE` by default is a decision made by omission.
+- [ ] Financial rows use **`ON DELETE RESTRICT`** — ledger entries and purchase records outlive the account (ADR-0010, `ARCHITECTURE.md` §11.4).
+- [ ] The **cascade chain is traced end to end**, not just one hop. `profiles` cascades from `auth.users`, so a `RESTRICT` two levels down blocks the auth-user delete — verify what the whole chain does, and write the test that proves it.
+- [ ] Actor/audit columns that reference a user for provenance rather than ownership use `ON DELETE SET NULL` (ADR-0009's `published_by`/`retired_by` is the precedent), so deleting a person does not delete a record of what happened.
+
+### 3. Privilege narrowing
+
+- [ ] `service_role` holds **only the operations the table's write path actually performs**. The blanket `SELECT, INSERT, UPDATE, DELETE` of ADR-0006 is a starting point, not an entitlement.
+- [ ] Every narrowing is named in the migration header **with its reason**, so a later "restore the standard grants" migration cannot undo it while looking like tidying.
+- [ ] The privileges pgTAP test asserts the **narrowed, per-table** posture. A test that asserts a uniform grant across all tables will pass on the day someone re-grants.
+- [ ] Nothing is granted to `anon` or `authenticated` on a financial table beyond a user's own read, and that read arrives with its policy in the same migration.
+
+### 4. Money and currency constraints
+
+- [ ] Every money column is `bigint` **minor units** with a `NOT NULL` `currency` column beside it, FK-validated against `currencies` (§2.4, §11.2). A currency-free amount must be unrepresentable.
+- [ ] Sign constraints match the semantics: prices and amounts `> 0`; ledger `delta <> 0`; a balance that is *allowed* to go negative (`balance_after`) carries **no** non-negative check, and the migration says why.
+- [ ] No `numeric`/`float` money column, no `×100` assumption, no currency inferred from a market or a locale at write time.
+- [ ] Purchase **snapshots are immutable in intent and documented as such** — what was bought and paid is frozen; only the status of the process may change.
+
+### 5. Idempotency
+
+- [ ] Every idempotency key column is **`NOT NULL` and `UNIQUE`**. A nullable key defeats the constraint entirely — multiple NULLs do not conflict in a unique index, so every unkeyed write passes.
+- [ ] External event identifiers (`stripe_event_id`, `stripe_payment_intent_id`, `stripe_checkout_session_id`) are unique, and the migration states which is the primary replay guard.
+- [ ] The duplicate-write path is **tested**, not assumed: the same key twice must be rejected or resolved to the prior result, and never applied twice.
+- [ ] Nothing deletes a row whose existence *is* the idempotency guarantee. `DELETE` on the webhook event table is revoked for exactly this reason.
+
+### 6. Before pushing
+
+- [ ] `npm run db:reset && npm run db:test` — the financial tests run from empty, as a set.
+- [ ] The reconciliation invariant still holds after the change: `sum(credit_ledger.delta) == profiles.credit_balance` per user (§11.4, AC10.8).
+- [ ] Types regenerated against the **remote** database and committed with the migration.

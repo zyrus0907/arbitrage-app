@@ -262,19 +262,37 @@ Shape when it arrives: `base_currency, quote_currency, rate_ppm (parts per milli
 | assumption_currency | text FK | currency the above are denominated in |
 | onboarded_at, created_at | timestamptz | |
 
-**`credit_ledger`** — append-only, source of truth for credits (unchanged from v1.0; credits are currency-neutral by design — see §9.1)
-`id, user_id, delta, reason (signup_grant|purchase|unlock_deal|barcode_lookup|refund|admin_adjust|promo), ref_type, ref_id, balance_after, idempotency_key UNIQUE, created_at`
-Index `(user_id, created_at desc)`. **No UPDATE, no DELETE, ever.**
+**`credit_ledger`** — append-only, source of truth for credits (credits are currency-neutral by design — see §9.1)
+`id, user_id, delta, reason (signup_grant|purchase|unlock_deal|barcode_lookup|refund|chargeback|admin_adjust|promo), ref_type, ref_id, balance_after, idempotency_key NOT NULL UNIQUE, created_at NOT NULL DEFAULT now()`
+Index `(user_id, created_at desc)`. `CHECK (delta <> 0)`. `balance_after` is `NOT NULL` and **may be negative** (§9.2 rule 4).
+
+**`refund` and `chargeback` are opposite directions and must not be merged** (ADR-0010):
+
+| Reason | Sign | Means |
+|---|---|---|
+| `refund` | **positive** | A credit **restored** to the user — a confirmed bad deal, honoured under the published refund policy (§9.3). |
+| `chargeback` | **negative** | A credit **clawed back** because Stripe reversed the payment that created it (`charge.refunded`, `charge.dispute.created`). |
+
+One is a product-quality event and the other is a payment event; they are read by different metrics and reconciled against different sources. The sign alone cannot distinguish them after the fact, since `admin_adjust` may also be negative.
+
+**No UPDATE, no DELETE, ever — enforced at two layers.** An append-only trigger rejects both, *and* `service_role` holds only `SELECT, INSERT` on this table: `UPDATE` and `DELETE` are revoked from it (ADR-0010). The revoke stops the role our own server code runs as; the trigger stops any role that does hold the privilege. **`user_id` is `ON DELETE RESTRICT`** — financial history survives account deletion (§11.5).
 
 **`credit_purchases`**
-`id, user_id, stripe_checkout_session_id UNIQUE, stripe_payment_intent_id, credit_pack_id, credits, amount_minor, currency, status (pending|paid|failed|refunded), created_at, completed_at`
+`id, user_id (ON DELETE RESTRICT), stripe_checkout_session_id UNIQUE, stripe_payment_intent_id NULLABLE UNIQUE, stripe_customer_id NULLABLE, credit_pack_id, credit_pack_price_id NULLABLE FK, credits, amount_minor, currency, status (pending|paid|failed|refunded), created_at, completed_at`
+Indexes `(user_id, created_at desc)` and `(status)`.
 
-**`stripe_webhook_events`** — `stripe_event_id PK, type, payload jsonb, processed_at, error`
+`credits`, `amount_minor` and `currency` are **immutable purchase snapshots** — what was bought and paid, frozen at purchase time, so re-pricing a pack later cannot rewrite what was sold. `status` and `completed_at` remain mutable: the row records a process. `credit_pack_price_id` records which per-currency price the sale was made at, and is nullable because a price row may be retired and an admin grant has none.
 
-**`credit_packs`** — `id, name, credits, active, sort_order`
-**`credit_pack_prices`** — `id, credit_pack_id FK, currency, amount_minor, stripe_price_id, active` — unique `(credit_pack_id, currency)`.
+**`stripe_webhook_events`** — `stripe_event_id PK, type, payload jsonb, received_at NOT NULL DEFAULT now(), processed_at NULLABLE, error`
+
+**This row is not immutable, and deliberately so.** Its **identity is frozen** — `stripe_event_id`, `type`, `payload` and `received_at` may never change, because the row is the evidence and the replay guard. Its **processing outcome is written after the fact**: `processed_at` (null until fulfilled) and `error` are the only mutable columns, enforced by a restricted-UPDATE trigger. `DELETE` is revoked from `service_role`: deleting an event re-opens the duplicate-grant window it exists to close.
+
+**`credit_packs`** — `id, name, credits, active, sort_order` — `CHECK (credits > 0)`
+**`credit_pack_prices`** — `id, credit_pack_id FK, currency FK → currencies, amount_minor, stripe_price_id NULLABLE, active` — unique `(credit_pack_id, currency)`, `CHECK (amount_minor > 0)`.
 
 > Pack *value* is credits; pack *price* is per-currency. This one split is what makes selling in USD, EUR and GBP a seeding exercise rather than a refactor.
+
+> **`stripe_price_id` is nullable on purpose.** Pack prices are seeded long before any Stripe object exists, and a placeholder id is worse than a null: it satisfies every not-null check and then fails at the checkout call. The safety is a read predicate rather than a column constraint — a pack price is publicly readable only where `active = true AND stripe_price_id IS NOT NULL`, so an unbuyable price is invisible rather than clickable.
 
 **`retailers`**
 `id, name, slug, market_id FK, country_code FK, currency FK, website_url, source_type (affiliate_feed|api|curated|manual), affiliate_network, affiliate_tracking_template, price_display (inclusive|exclusive, defaults from country), active, created_at`
@@ -578,11 +596,12 @@ Unchanged from v1.0 in substance. Two additions for global operation.
 | Table | Policy | Grant to `anon`/`authenticated` |
 |---|---|---|
 | `profiles` | SELECT/UPDATE where `id = auth.uid()`; `credit_balance` not directly updatable. | `SELECT, UPDATE` (authenticated) |
-| `credit_ledger` | SELECT own rows. **No write policy at all** — writes only via `SECURITY DEFINER` RPC. | `SELECT` only (authenticated) |
+| `credit_ledger` | SELECT own rows. **No write policy at all** — writes only via `SECURITY DEFINER` RPC. Additionally, `service_role` holds `SELECT, INSERT` only: `UPDATE` and `DELETE` are revoked from it (ADR-0010). | `SELECT` only (authenticated) |
 | `deal_unlocks`, `watchlist_items`, `purchase_records`, `barcode_lookups` | SELECT/INSERT/DELETE where `user_id = auth.uid()`. | matching per-operation grants (authenticated) |
 | `deals`, `retailer_products`, `marketplace_products`, `product_matches` | **No policies. Service-role only.** Access via server routes that apply redaction. | **none** |
 | `markets`, `countries`, `currencies` | SELECT where `active = true` (public read — the client needs to render a currency and a market name). | `SELECT` |
-| `credit_packs`, `credit_pack_prices` | SELECT where `active = true`. | `SELECT` |
+| `credit_packs` | SELECT where `active = true`. | `SELECT` |
+| `credit_pack_prices` | SELECT where `active = true` **and `stripe_price_id IS NOT NULL`** — a price with no Stripe Price ID cannot be bought and is not shown (ADR-0010). | `SELECT` |
 | `marketplaces` | **No policy. Service-role only** (ADR-008). | **none** |
 | `fee_schedules`, `tax_schedules`, logs, runs | service-role only. | **none** |
 
@@ -852,7 +871,7 @@ Client → /credits?status=success — polls balance; UI never trusts the redire
 1. **Credits are granted by the webhook, never by the success redirect.** The redirect is cosmetic and forgeable.
 2. Signature verification against the **raw request body**.
 3. Idempotency at two layers: `stripe_webhook_events` PK and `credit_ledger.idempotency_key`.
-4. Handle `charge.refunded` / `charge.dispute.created` → deduct credits (allow negative balance; block spend, don't erase history).
+4. Handle `charge.refunded` / `charge.dispute.created` → deduct credits with reason **`chargeback`** (a **negative** delta; allow a negative balance; block spend, don't erase history). This is not the same event as a **`refund`**, which is a **positive** restoration granted when *we* got a deal wrong (§9.3). A Stripe reversal is a payment failure and a product refund is a quality failure — one ledger reason each, never one for both.
 5. Prices and credit counts come from the database server-side. **Never** trust a price, currency or quantity from the client — currency in particular, since a client-chosen currency is a discount exploit.
 6. Tax on the credit sale (VAT/GST on digital services, US sales tax) is handled by **Stripe Tax**, not by hand. Enable it before selling into a second country.
 
@@ -867,7 +886,7 @@ POST /deals/:id/unlock  (Idempotency-Key)
     COMMIT
   → return full deal
 ```
-If a deal proves materially wrong (bad match, confirmed), refund the credit with `reason='refund'`. Publish the policy — a visible refund policy is a cheap, powerful trust signal.
+If a deal proves materially wrong (bad match, confirmed), refund the credit with `reason='refund'` — **a positive ledger delta restoring the credit**, one row per affected user. Publish the policy — a visible refund policy is a cheap, powerful trust signal. A Stripe-side reversal is the opposite direction and uses `reason='chargeback'` (§9.2 rule 4).
 
 ---
 
@@ -957,9 +976,10 @@ Checkout + webhooks only. Multi-currency Prices per pack. Stripe Tax for digital
 ### 11.2 Database
 - RLS on **every** table, default deny (§6.3).
 - `SECURITY DEFINER` functions with `set search_path = public, pg_temp`.
-- Ledger tables append-only, enforced by a trigger rejecting UPDATE/DELETE.
+- **`credit_ledger` is append-only, enforced twice:** a trigger rejecting UPDATE/DELETE, *and* the absence of the privilege — `service_role` holds `SELECT, INSERT` only. Either layer alone leaves AC10.5 true by accident (a revoke says nothing about a role that has the privilege; a trigger is one `DROP TRIGGER` from gone).
+- **`stripe_webhook_events` is *restricted*, not immutable:** identity, `type`, `payload` and `received_at` are frozen by trigger; `processed_at` and `error` are writable, because the processing outcome is recorded after the event arrives. `DELETE` is revoked from `service_role`.
 - No dynamic SQL built from user input.
-- **Check constraints on money:** every table with a money column has a matching `currency` column and a constraint that it is non-null. A currency-free amount must be impossible at the storage layer, not merely discouraged.
+- **Check constraints on money:** every table with a money column has a matching `currency` column and a constraint that it is non-null. A currency-free amount must be impossible at the storage layer, not merely discouraged. This applies to the financial tables without exception — `credit_purchases.amount_minor` and `credit_pack_prices.amount_minor` are `bigint` minor units with an FK-validated `currency`, positive by check constraint.
 
 ### 11.3 Application
 - Zod-validate every input at the boundary. Never trust client-supplied prices, currencies, credit amounts, market ids, user ids or deal ids.
@@ -975,9 +995,11 @@ Checkout + webhooks only. Multi-currency Prices per pack. Stripe Tax for digital
 - Credits move only through the RPC. Scheduled reconciliation: `sum(credit_ledger.delta) == profiles.credit_balance` for every user; alert on mismatch.
 - Reconcile `credit_purchases` against Stripe daily, **per currency** — a currency-blind total hides a per-currency bug.
 - Log every credit movement with actor, reason and reference.
+- **Financial records survive account deletion.** `credit_ledger.user_id` and `credit_purchases.user_id` are `ON DELETE RESTRICT`, so a deleted account cannot take its ledger or its purchase history with it. Reconciliation that could be emptied by a user closing their account is not reconciliation, and a chargeback can arrive months after the account is gone. Deletion is therefore pseudonymisation of the retained rows plus removal of everything else (§11.5, ADR-0010).
 
 ### 11.5 Privacy and compliance — now multi-jurisdiction
-- **Baseline is GDPR-grade for everyone.** Building to the strictest regime and applying it globally is cheaper for one founder than maintaining per-region behaviour: privacy policy, data export, account deletion (cascade from `auth.users`), lawful basis, minimal retention.
+- **Baseline is GDPR-grade for everyone.** Building to the strictest regime and applying it globally is cheaper for one founder than maintaining per-region behaviour: privacy policy, data export, account deletion, lawful basis, minimal retention.
+- **Account deletion is a cascade for personal data and a retention-plus-pseudonymisation for financial data** (ADR-0010). Profile, unlocks, watchlist, purchase records and barcode lookups cascade from `auth.users`. `credit_ledger` and `credit_purchases` do **not** — they are `ON DELETE RESTRICT` and are kept as audit and reconciliation evidence, which every privacy regime that matters here treats as a legitimate retention basis. The consequence is concrete: a plain `delete from auth.users` fails while ledger rows exist, so deletion must pseudonymise the retained rows. **The mechanism is an open T10 decision and is deliberately not fixed here** — it determines the FK shape, the reconciliation query and the strength of the privacy claim at once, and belongs to the task that implements and tests it.
 - Add per-region notices as **content**, not code paths: CCPA/CPRA "do not sell" (nothing is sold), UK/EU cookie consent, and market-specific terms.
 - **Data residency is not addressed in MVP.** Supabase runs in one region. If a market later requires local storage, that is a Phase 4 infrastructure decision with its own ADR — do not pretend it is solved.
 - Minimal PII: email and preferences. No payment details — Stripe holds those.
@@ -1207,6 +1229,9 @@ Each step is independently shippable and testable. Do not start the next until t
 | Personalisation | In-request overlay, not per-user precompute | Avoids N×M explosion |
 | Credits | Prepaid packs, currency-neutral unit, per-currency pack prices | Decouples value from currency; global pricing becomes a table |
 | Payments | Stripe Checkout, multi-currency Prices, Stripe Tax, webhook-granted credits | Minimal PCI surface, no forgeable client trust, no hand-rolled tax |
+| Credit reversals | `refund` (positive, our error) and `chargeback` (negative, Stripe reversal) are separate ledger reasons | Product-quality events and payment events are reconciled against different sources |
+| Ledger immutability | Append-only trigger **and** `UPDATE`/`DELETE` revoked from `service_role` | Two independent layers; neither is sufficient alone |
+| Financial retention | `credit_ledger` and `credit_purchases` are `ON DELETE RESTRICT` and survive account deletion | Reconciliation that a user can empty is not reconciliation; deletion becomes pseudonymisation (T10) |
 | i18n | Message catalogue now, translation later | Near-zero cost now; every component later |
 | Compliance | GDPR-grade baseline globally | Cheaper for one founder than per-region behaviour |
 | State management | Server Components, no client store | Nothing to synchronise yet |

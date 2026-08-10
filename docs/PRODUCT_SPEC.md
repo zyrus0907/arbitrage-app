@@ -328,7 +328,8 @@ Written as verifiable conditions. Given / When / Then where behavioural.
 - **AC1.2** Given an unverified account, when the user attempts to spend a credit, then the spend is refused with a clear "verify your email" message and **no credit is deducted**.
 - **AC1.3** Given a logged-out visitor, when they request any `/(app)/*` route, then they are redirected to sign-in and returned to the intended route afterwards.
 - **AC1.4** Session tokens are never present in `localStorage` or any client-readable storage. Verified by inspection as a release gate.
-- **AC1.5** A user can delete their account; all personal rows cascade and the deletion completes within 30 days per the applicable privacy regime and the product's GDPR-grade baseline.
+- **AC1.5** A user can delete their account; all **personal** rows cascade and the deletion completes within 30 days per the applicable privacy regime and the product's GDPR-grade baseline.
+- **AC1.6** **Financial records are retained, not deleted.** Credit ledger entries and credit purchase records survive account deletion for audit and reconciliation — they are never cascade-deleted with the account, and the retained rows must not identify the deleted user. A chargeback can arrive after an account closes, and a reconciliation a user can empty by closing their account proves nothing. The privacy policy states this retention plainly, and the mechanism that de-identifies the retained rows is decided and implemented in T10.
 
 ---
 
@@ -491,7 +492,7 @@ Written as verifiable conditions. Given / When / Then where behavioural.
 - **AC15.1** A report control is available on every unlocked deal.
 - **AC15.2** Reasons offered: wrong product matched · wrong pack size · price is wrong · out of stock · other (free text).
 - **AC15.3** Reports appear in an admin queue with the deal, the reporter, and the reason.
-- **AC15.4** An admin can confirm a report, which retires the deal and refunds the credit to every user who unlocked it, recorded in the ledger with reason `refund`.
+- **AC15.4** An admin can confirm a report, which retires the deal and refunds the credit to every user who unlocked it, recorded in the ledger with reason **`refund`** and a **positive** delta — the credit is restored, one ledger row per affected user. This reason is reserved for restoring credits after our own error; a Stripe payment reversal is `chargeback` (AC17.5) and moves in the opposite direction.
 - **AC15.5** The refund policy is published and linked from the unlock button and the credits page.
 - **AC15.6** **A confirmed bad-match report marks the underlying product match rejected**, not just the deal retired. Retiring the deal alone is not enough: the match is what was wrong, and the next pipeline run would recompute the same deal from the same match and republish the same error. A rejected match is never used to create a deal again, and reversing that judgement is a deliberate admin act.
 
@@ -512,7 +513,7 @@ Written as verifiable conditions. Given / When / Then where behavioural.
 - **AC17.2** Webhook signature is verified against the raw request body.
 - **AC17.3** A replayed webhook event grants credits exactly once. Verified by Stripe CLI replay as a release gate.
 - **AC17.4** Pack price and credit quantity are read server-side from the database. No client-supplied price or quantity is ever trusted.
-- **AC17.5** A refund or chargeback deducts credits, permitting a negative balance; history is never erased.
+- **AC17.5** A **Stripe refund or chargeback** — the payment being reversed — deducts credits with a **negative** delta recorded under reason **`chargeback`**, permitting a negative balance; history is never erased and no ledger row is edited or removed. This is distinct from a bad-deal credit refund (AC15.4, reason `refund`, positive): one is a payment failure, the other a product failure, and they are reported and reconciled separately.
 - **AC17.6** The success page polls the balance rather than asserting success from the redirect.
 
 ---
@@ -522,7 +523,7 @@ Written as verifiable conditions. Given / When / Then where behavioural.
 - **AC21.1** Terms of service, privacy policy, and refund policy are published and linked from the footer and from signup. Market-specific notices are added before a market goes live.
 - **AC21.2** "Estimates, not guarantees. Not financial or tax advice." appears on every screen displaying a profit figure.
 - **AC21.3** A gating and eligibility warning appears on every unlocked deal.
-- **AC21.4** the applicable privacy regime and the product's GDPR-grade baseline: users can export their data and delete their account from settings under the product's GDPR-grade baseline; additional jurisdiction-specific rights are handled as market requirements.
+- **AC21.4** the applicable privacy regime and the product's GDPR-grade baseline: users can export their data and delete their account from settings under the product's GDPR-grade baseline; additional jurisdiction-specific rights are handled as market requirements. The privacy policy states which records are **retained after deletion** and why — credit ledger and purchase history are kept as financial and audit records, de-identified rather than deleted (AC1.6).
 
 ---
 
@@ -593,7 +594,7 @@ The two "trust points" are where the hypothesis actually gets tested. Everything
 | Confirmed bad matches | Errors that were real | > 1% of unlocks — **stop and fix** |
 | Assumptions-panel edit rate | Users disagreeing with our defaults | > 50% suggests our defaults are wrong |
 | Unlock-then-immediate-exit rate | Deal disappointed on reveal | > 40% |
-| Credit refunds issued | Direct cost of error | Any spike |
+| Credit refunds issued | Direct cost of error — ledger reason `refund` **only**; Stripe reversals (`chargeback`) are a payment signal, not a trust signal, and must not be counted here | Any spike |
 
 ### 9.5 Health and cost
 
