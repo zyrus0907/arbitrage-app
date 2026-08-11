@@ -42,3 +42,58 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # T09 — the database security gate.
+  #
+  # This job is a BLOCKER and may never be skipped (tests/README.md).
+  #
+  # It exists because of a finding T09 made about CI itself: before this, the
+  # entire pgTAP suite ran only on a developer's machine. Every protection built
+  # in T03–T08 — RLS, the grant matrix, the append-only ledger, the temporal
+  # exclusion constraints, the seed's integrity — was verified nowhere that could
+  # block a merge. A migration that dropped a policy passed CI green.
+  #
+  # Both suites run here, and they answer different questions:
+  #   db:test          — the catalogue is correct (reached as owner, via SET ROLE)
+  #   test:integration — a browser holding the anon key gets what we think it
+  #                      gets (reached over HTTP, with real JWTs)
+  # Neither substitutes for the other: SET ROLE is not a JWT, and a JWT cannot
+  # see the catalogue.
+  # ---------------------------------------------------------------------------
+  database:
+    name: database security · pgTAP + anon-key RLS suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The pinned CLI from node_modules, never a global install — the local
+      # stack must be the version package.json names.
+      - name: Start local Supabase stack
+        run: npx supabase start
+
+      # From zero, every time: migrations in order, then the T08 seed. This is
+      # also the reproducibility proof — if a migration only applies to a
+      # database that already had the previous state, it fails here.
+      - name: Reset database from zero (migrations + seed)
+        run: npm run db:reset
+
+      - name: Database tests (pgTAP)
+        run: npm run db:test
+
+      - name: Anon-key and RLS access verification
+        run: npm run test:integration
+
+      - name: Stop stack
+        if: always()
+        run: npx supabase stop --no-backup

@@ -925,3 +925,50 @@ The EUR rows are set independently rather than FX-converted, per §2.3: a price 
 - **T09 gets the fixtures its criteria require.** Inactive countries (DE, US, JP), a non-live market (`de-amazon-de`) and inactive pack prices (the EUR rows) all exist as seeded rows, so "inactive rows are absent" can be asserted against something real rather than assumed.
 - **T08 seed data was deliberately NOT applied to the hosted development project.** It is the deterministic baseline for local and ephemeral CI databases. `supabase db push` does not carry seeds — it requires an explicit `--include-seed` — so the separation is the tool's default rather than a convention to remember.
 - **Two pre-existing test assertions were whole-table counts that assumed empty reference tables**, and T08's seed is the first thing that ever put rows in them. Both were rescoped to their own fixtures rather than relaxed: the claims being made were about fixture rows resolving independently, never about how many rows the database happens to hold.
+
+---
+
+## ADR-0016 — `stripe_webhook_events` gets a TRUNCATE guard, and the security baseline is asserted as an allowlist
+
+**Status:** Accepted · T09 · 2026-08-11 · resolves the item T06 deferred · implements ADR-0010 decision 5 and ADR-0011 decision 5 · adds one migration, one function, one trigger · **no grant, no policy, no column, no row changed**
+
+**Context.** T09 is a QA checkpoint, not a feature task, so it should normally produce tests and findings rather than migrations. Two things justified changing that, and one of them was assigned to T09 explicitly: T06's completion note says `stripe_webhook_events` has no TRUNCATE guard while `credit_ledger` does, and that "T09 should decide it deliberately."
+
+**Decision 1 — Add the guard. The hole was measured, not assumed.**
+
+Before this migration, with the local stack in its committed state:
+
+| Actor | `DELETE` | `TRUNCATE` |
+|---|---|---|
+| `anon` / `authenticated` | no privilege | no privilege |
+| `service_role` | revoked → `42501` | no privilege → `42501` |
+| owner (`postgres`) | trigger → `0A000` | **succeeded** |
+
+The row trigger T06 added fires `BEFORE DELETE OR UPDATE`. A **row** trigger never fires for `TRUNCATE` — that is how TRUNCATE works, not a quirk of this schema — so a table whose rows are the Stripe replay guard could be emptied in one statement by a migration, a support script, or a dashboard SQL session. Those are the same three actors ADR-0011 decision 5 named when it put the identical guard on `credit_ledger`, and the trigger this table already carries says in its own DELETE branch: *never remove the evidence*. `TRUNCATE` walked past that sentence.
+
+**Severity is bounded, and saying so is part of the decision rather than a reason to skip it.** Emptying this table does not by itself re-open the duplicate-grant window, because §9.2 rule 3 has two layers and this is only the second. The first is `credit_ledger.idempotency_key` — `NOT NULL UNIQUE`, keyed on `stripe_event_id` for T35's webhook fulfilment, on a table that is itself TRUNCATE-guarded. A replayed event after a truncate still collides there. What is actually lost is the evidence of what Stripe sent and when, which ADR-0010 decision 5 treats as the table's other job rather than a side effect.
+
+The operational cost is zero. `DELETE` is already refused unconditionally, so no pruning or retention path exists that this guard could break. If a retention policy is ever wanted it needs its own decision and its own migration either way; the guard makes that explicit instead of leaving one command as the de-facto policy.
+
+**A second trigger rather than an extension of the existing one.** `enforce_webhook_event_restricted_update` must stay a ROW trigger — it compares OLD and NEW column by column, which a statement trigger cannot do. `credit_ledger` shares one function between its row and statement triggers because its answer is unconditional; this table's is not, since `processed_at` and `error` remain writable. Two functions saying different things is honest here, not duplicative.
+
+**Decision 2 — The security baseline is asserted as an ALLOWLIST, not as a set of behaviours.**
+
+Every suite from T03 to T08 asserts that the objects its author knew about behave correctly. None of them fails when something **new** appears. A migration in T20 that adds a grant, a policy, a function or a table passes all 887 existing assertions, because nothing is looking for it.
+
+`supabase/tests/database/security_baseline.test.sql` closes that by comparing the whole catalogue against literals: the 40-row table-privilege matrix, the 14 column grants, the 19 policies, and the 9 functions with their `SECURITY DEFINER` flag, pinned `search_path` and exact ACL. Any addition anywhere turns it red. When the change is intended, the literal is updated in the same commit — so the diff of that file becomes the audit record of every privilege change from here to T44.
+
+**Decision 3 — `42501` is ambiguous, and the integration suite classifies outcomes rather than codes.**
+
+T09's failure-mode rule warns that asserting "no rows" passes for the wrong reason. Reconnaissance against a running stack found a sharper version of the same trap: **PostgREST returns `42501` for both a missing grant and an RLS `WITH CHECK` violation**, distinguishable only by message (`permission denied for table X` versus `new row violates row-level security policy for table "X"`).
+
+A suite asserting `error.code === '42501'` therefore cannot tell the grant layer from the policy layer, and would keep passing on the day someone adds a grant to a table that still has a restrictive policy — the exact regression it exists to catch. `tests/integration/rls.test.ts` classifies every response into `rows | privilege-denied | rls-refused | trigger-refused | constraint | other` and asserts the classification, never the raw code.
+
+**Consequences.**
+
+- **`supabase/tests/database/*.test.sql` and the anon-key suite now run in CI, and did not before.** This was a T09 finding in its own right: every database protection built in T03–T08 was verified only on a developer's machine. A new `database` job starts the stack, resets from zero, and runs both. It is a blocker.
+- **The two suites are not redundant and neither may be dropped for the other.** pgTAP reaches the database as the owner using `SET LOCAL ROLE`, which proves the catalogue. The integration suite presents real JWTs to PostgREST, which proves what a browser receives. `SET ROLE` is not a JWT: it does not populate `auth.uid()`, does not traverse PostgREST's schema exposure, and does not exercise the token path at all.
+- **The integration suite cannot fully tear itself down, by design.** Asserting that user A sees only A's `credit_ledger` rows requires writing ledger rows for A and B; those rows are undeletable at every layer (trigger, revoked privilege) and make the users undeletable too (`ON DELETE RESTRICT`, ADR-0010). The suite asserts that retention behaviour instead of working around it, and requires an ephemeral or freshly reset database — which is what its CI job provides.
+- **T09's own acceptance-criteria list is one table short.** It names twelve service-role-only tables and omits `retailers`, which carries no policy and no client grant exactly like the other twelve. The "every table appears in exactly one category" criterion is what surfaced it, which is the criterion working as intended. The suite covers thirteen.
+- **`service_role` still holds direct `INSERT` on `credit_ledger` and `UPDATE` on `profiles`.** T09 verified this is still true and deliberately did **not** narrow it: ADR-0014 assigned that decision to **T26**, whose blast radius includes T35's purchase bookkeeping. The convention is held in the meantime by `tests/unit/supabase/credit-rpcs-are-the-only-writer.test.ts`.
+- **The vitest default timeout was raised from 5 s to 15 s, with the cause measured.** The first test in a React file pays a one-off ~350 ms jsdom + React + module-graph warm-up its siblings do not (they run in 11–130 ms). That is 13× inside the default budget on an idle machine and not on a contended CI runner, which is what produced two false reds during T08. The failure was never a hang, so the larger budget masks none — a genuine hang still fails, ten seconds later.

@@ -27,7 +27,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog, pg_temp;
 
-select plan(156);
+select plan(158);
 
 -- ---------------------------------------------------------------------------
 -- Helpers: run a statement AS another role and report the mechanism
@@ -833,17 +833,40 @@ select ok(
 -- Asserting ONE and naming it is the assertion that keeps the "two triggers
 -- with one purpose" trap closed: a second guard here would let either be
 -- dropped with no test going red.
+-- Updated by T09, which added the TRUNCATE guard T06 deferred to it (ADR-0016).
+-- The count moved from one to two and the assertion was made MORE specific
+-- rather than looser: it now names both triggers and, below, their levels. The
+-- trap this guards against is two triggers with ONE purpose, either of which
+-- could be dropped with nothing going red. These two have different purposes —
+-- a row trigger cannot see TRUNCATE and a statement trigger cannot compare OLD
+-- with NEW — so neither is redundant, and asserting the level of each is what
+-- keeps that true.
 select is(
   (select count(*)::int from pg_trigger
     where tgrelid = 'public.stripe_webhook_events'::regclass and not tgisinternal),
-  1,
-  'stripe_webhook_events carries exactly one trigger — T05 added none, T06 added the restricted-UPDATE guard');
+  2,
+  'stripe_webhook_events carries exactly two triggers — T06''s restricted UPDATE and T09''s TRUNCATE guard');
 
 select is(
-  (select tgname::text from pg_trigger
+  (select string_agg(tgname::text, ',' order by tgname) from pg_trigger
     where tgrelid = 'public.stripe_webhook_events'::regclass and not tgisinternal),
-  'stripe_webhook_events_restricted_update',
-  'and it is T06''s restricted-UPDATE trigger by name — not a blanket immutability guard, which would break T35''s fulfilment path');
+  'stripe_webhook_events_no_truncate,stripe_webhook_events_restricted_update',
+  'and they are exactly those two by name — no blanket immutability guard, which would break T35''s fulfilment path');
+
+-- Levels asserted explicitly: swapping either would silently disable it.
+select is(
+  (select (tgtype::int & 1) from pg_trigger
+    where tgrelid = 'public.stripe_webhook_events'::regclass
+      and tgname = 'stripe_webhook_events_restricted_update'),
+  1,
+  'the restricted-UPDATE guard is a ROW trigger — it must see OLD and NEW');
+
+select is(
+  (select (tgtype::int & 1) from pg_trigger
+    where tgrelid = 'public.stripe_webhook_events'::regclass
+      and tgname = 'stripe_webhook_events_no_truncate'),
+  0,
+  'the TRUNCATE guard is a STATEMENT trigger — a row trigger never fires for TRUNCATE');
 
 select ok(
   not has_table_privilege('service_role', 'public.stripe_webhook_events', 'DELETE'),
@@ -1170,6 +1193,8 @@ select is(
       and p.proname not in ('set_updated_at', 'handle_new_user',
                             'enforce_deal_lifecycle', 'enforce_credit_ledger_append_only',
                             'enforce_webhook_event_restricted_update',
+                            -- T09/ADR-0016: the TRUNCATE guard T06 deferred.
+                            'enforce_webhook_events_no_truncate',
                             'spend_credits', 'grant_credits',
                             'credit_ledger_idempotent_match',
                             '_sqlstate_as', '_scalar_as')),

@@ -1381,6 +1381,8 @@ select is(
       and p.proname not in ('set_updated_at', 'handle_new_user',
                             'enforce_deal_lifecycle', 'enforce_credit_ledger_append_only',
                             'enforce_webhook_event_restricted_update',
+                            -- T09/ADR-0016: the TRUNCATE guard T06 deferred.
+                            'enforce_webhook_events_no_truncate',
                             'spend_credits', 'grant_credits',
                             'credit_ledger_idempotent_match',
                             '_deal_sql')),
