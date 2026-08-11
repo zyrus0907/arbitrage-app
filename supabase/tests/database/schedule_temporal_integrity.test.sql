@@ -509,9 +509,16 @@ select is(
 
 -- Both keys resolve independently on the same date — the global-first claim,
 -- reduced to two counts.
+--
+-- Scoped to this file's own fixture countries. It was unscoped while these
+-- tables were empty, which made it a whole-table count that T08's seed then
+-- broke by adding real GB and DE schedules. The claim being made is about AA
+-- and BB resolving independently of each other, not about how many countries
+-- the database happens to hold.
 select is(
   (select count(distinct country_code)::int from public.tax_schedules
-    where effective_from <= date '2024-06-01'
+    where country_code in ('AA', 'BB')
+      and effective_from <= date '2024-06-01'
       and (effective_to is null or effective_to > date '2024-06-01')),
   2,
   'on one date, two countries each resolve their own tax schedule');

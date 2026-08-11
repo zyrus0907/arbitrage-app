@@ -746,9 +746,16 @@ select is(
   2,
   'a credit_pack_prices row with stripe_price_id NULL is valid — and two of them coexist, as T08 will seed');
 
+-- Scoped to this file's own fixture pack, exactly as the assertion above is.
+-- It was an unscoped whole-table count while the table was empty; T08's seed
+-- added six more NULL-priced rows, which is the behaviour that assertion
+-- predicted rather than a regression. The claim is that service_role can read
+-- NULL-priced rows, not that only two exist in the database.
 select is(
   public._scalar_as('service_role',
-    $$select count(*) from public.credit_pack_prices where stripe_price_id is null$$),
+    $$select count(*) from public.credit_pack_prices
+       where credit_pack_id = 'b1000000-0000-0000-0000-000000000001'
+         and stripe_price_id is null$$),
   '2',
   'and service_role can read those rows');
 

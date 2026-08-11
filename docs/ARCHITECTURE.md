@@ -227,7 +227,9 @@ MVP seeds: Amazon locales only. `capabilities` drives §8.7. `fulfilment_program
 **`fee_schedules`** — versioned, **per marketplace**
 `id PK, marketplace_id FK, version, effective_from, effective_to, referral_rules jsonb, fulfilment_bands jsonb, storage_rules jsonb, surcharges jsonb, currency, source_url, verified_at, created_at`
 
-`surcharges` is a list, not a column — this is what replaces v1.0's hardcoded `digital_services_fee_bps`. Each entry: `{code, label, basis: 'referral_fee'|'sell_price'|'flat', rate_bps|amount_minor, applies_to_countries?}`. A new marketplace levy becomes a row edit.
+`surcharges` is a list, not a column — this is what replaces v1.0's hardcoded `digital_services_fee_bps`. Each entry: `{code, label, basis: 'referral_fee'|'fulfilment_fee'|'selling_fees'|'sell_price'|'flat', rate_bps|amount_minor, applies_to_countries?, applies_to_categories?}`. A new marketplace levy becomes a row edit.
+
+> **`basis` widened in v2.4 (ADR-0015, T08).** It previously read `'referral_fee'|'sell_price'|'flat'`, which could not express two of the launch market's three real surcharges: the UK Digital Services Fee applies to Selling on Amazon fees **and** FBA fees, and the fuel and logistics surcharge applies to fulfilment fees alone. `selling_fees` means referral + fulfilment; `fulfilment_fee` means fulfilment only. `applies_to_categories?` joins `applies_to_countries?` because a media closing fee is flat but category-scoped. Forcing either onto `referral_fee` would have charged it against too small a base — understating cost and therefore **overstating profit**, which is the one direction of error this product cannot afford (risk #5). **T14 must implement all five bases and must throw on an unrecognised one**; a `default:` branch that skips or coerces it reintroduces the same silent, market-wide understatement.
 
 **`fx_rates`** — **deferred to Phase 3. Not created in the MVP** (ADR-005)
 Shape when it arrives: `base_currency, quote_currency, rate_ppm (parts per million, bigint), as_of, source`.

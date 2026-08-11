@@ -857,3 +857,71 @@ It is a third function in a task whose file list names two. Flagged rather than 
 - **T09 inherits the privilege matrix as an assertion**: `spend_credits` and `grant_credits` are `postgres=X/postgres,service_role=X/postgres` exactly, and a NULL `proacl` on either is a `PUBLIC` execute grant on a credit-minting function.
 - **The concurrency gate is automated and is mutation-checked.** `supabase/tests/database/credit_rpcs_concurrency.test.sql` drives real concurrent sessions through `dblink`, because two sequential calls in one transaction prove arithmetic and would pass against a `spend_credits` with no `FOR UPDATE` in it. Deleting the `FOR UPDATE` was tried: the file fails fourteen assertions, with AC10.1 landing six successful unlocks and a balance of `-5` against a starting balance of `1`. That file commits its fixtures and removes them again, which is the one place in the suite where a test is not purely a rolled-back transaction, and it is documented in the file header.
 - **`npm run db:test` is now a wrapper, and that is a consequence of the concurrency gate rather than a preference.** `dblink` refuses a passwordless connection for a non-superuser; `dblink_connect_u`, which would not, is owned by `supabase_admin` and grants `postgres` no EXECUTE even when a migration creates the extension. A password is therefore unavoidable, and it must not be committed. `supabase test db` provides no way to pass one: it parses the connection URL into components and rebuilds the connection inside its own container, so `?options=-c …` is discarded (the session reports `application_name=psql`) and `PGOPTIONS` does not cross the container boundary. The only channel that survives is the database itself, so `scripts/db-test.mjs` publishes the local password as a database-level `t7.db_password` setting for the length of the run and removes it in a `finally`. The password never reaches argv, disk or any stream — the `ALTER DATABASE` goes to psql on stdin inside the container, over the socket the local stack trusts, and the one step needing superuser is the only reason `supabase_admin` is used at all. **The test file has no fallback:** an absent setting raises, because a test that substituted a default would pass only where the default happened to be right.
+
+---
+
+## ADR-0015 — The launch market is GB / `amazon_uk` / GBP, the surcharge basis vocabulary is wider than §2.2 says, and pack prices are provisional
+
+**Status:** Accepted · T08 · 2026-08-11 · amends `ARCHITECTURE.md` §2.2 on one point · implements ADR-005, ADR-006/ADR-0012, ADR-008 and ADR-0010 · changes no T03–T07 outcome · **no migration, no remote data**
+
+**Context.** T08 seeds reference data, and reference data is where an architecture stops being a claim. Four of the things this task had to settle were settled nowhere: which market we actually launch in, whether a one-market seed compromises the global-first schema, how to express fees that the documented surcharge vocabulary cannot represent, and what a pack price means before anyone has decided what a credit costs. Each is invisible until you are writing rows against the columns that exist.
+
+**Decision 1 — The initial MVP launch market is GB / `amazon_uk` / GBP, and this ADR is the first place that is written down.**
+
+Every document assumes it and none records it. `ARCHITECTURE.md` §2.2 uses `'amazon_uk'` as its worked example of a marketplace `code`, §1.3's `MarketContext` sketch carries `id: 'amazon_uk'`, §13's greppable-literal ban names `'GB'` as the literal that must not appear in a service, and `PRODUCT_SPEC.md` prices its motivating example in pounds. `PRODUCT_SPEC.md` otherwise says "the chosen launch market" throughout, deliberately, so that the product spec stays market-neutral — which is right, and which is also why the choice has to be recorded somewhere else rather than inferred from an example.
+
+So: `countries.GB` active, `marketplaces.amazon_uk` active, `markets.gb-amazon-uk` with `active = true AND launch_status = 'live'`. That pair is exactly T06's public-read predicate, so the launch market is also the only market a browser can see.
+
+The choice is recorded as a *decision*, not a discovery, because the alternative — leaving it implicit — has a specific failure mode. `'GB'` and `'amazon_uk'` would keep appearing in examples, then in a fixture, then in a default, and §13's literal ban would be enforced against a value nobody had ever formally chosen.
+
+**Decision 2 — One live market is a seeding fact. The schema stays global-first, and the proof is a second market rather than an assertion.**
+
+The risk in seeding a single market is not that the seed is small; it is that "the launch market" quietly becomes a synonym for "the market", and the second one then costs a migration. T08's acceptance criterion asks for a demonstration, so the seed contains one: `de-amazon-de` — country DE, marketplace `amazon_de`, currency EUR, its own tax schedule, its own fee schedule with its own storage unit — added with **no DDL, no new column, no code change, and no new enum value**. It is `planned` and inactive, so it is invisible to `anon` and `authenticated` and consumes nothing.
+
+Three specific things are held global rather than collapsed to the launch market, and each is asserted:
+
+- **`currencies` spans three minor-unit exponents.** T03's own comment on `minor_unit_exponent` cited "2 for GBP/USD/EUR, 0 for JPY, 3 for KWD" as the reason the exponent is data — but only 0 and 2 had ever been seeded, so code dividing by 100 would have passed every test in the repository. KWD is seeded to close that, and `amazon_jp` exists as a marketplace whose money columns are JPY, because a zero-decimal *currency row* proves less than a zero-decimal *marketplace*.
+- **Storage is billed in different units in different markets.** UK FBA storage is per cubic **foot**; the rest of Europe is per cubic **metre**. `storage_rules.unit` is therefore data on every row, and a pricing engine that assumed m³ would be wrong by a factor of about thirty-five. This is the cleanest available demonstration that a per-market constant cannot be hoisted into code.
+- **`retailers.price_display` is stored per retailer even though all five seeded retailers agree with their country.** §7.4 warns the assumption is systematically wrong when borrowed; a UK trade or wholesale retailer displays ex-VAT prices, and adding one must be a row rather than an exception.
+
+**Exactly one live market remains seeding and release discipline, not a constraint.** No uniqueness index is added on `launch_status`, because it is a lever T33's admin console legitimately flips (AC16.4), and a constraint there would block a legitimate operation to prevent a mistake that belongs to a checklist. The rule lives in `docs/MARKET_PLAYBOOK.md`, in the T40 gate list, and as an assertion over the seed.
+
+**Decision 3 — `surcharges.basis` gains `selling_fees` and `fulfilment_fee`, and entries gain `applies_to_categories`. This is the one deviation from `ARCHITECTURE.md` in T08.**
+
+§2.2 defines a surcharge entry as `{code, label, basis: 'referral_fee'|'sell_price'|'flat', rate_bps|amount_minor, applies_to_countries?}`. The launch market has three real surcharges and that vocabulary can express exactly one of them:
+
+| Surcharge | What it actually applies to | Expressible in §2.2? |
+|---|---|---|
+| Digital Services Fee, 2% | Selling on Amazon fees **and** FBA fees | No — `referral_fee` covers half |
+| Fuel and logistics surcharge, 1.5% | Fulfilment fees only | No — no such basis |
+| Media closing fee, £0.50 | Flat, but only on media categories | Partly — `flat` fits, category scoping does not |
+
+The vocabulary is widened rather than the data being bent to fit, because bending it has a direction. Forcing the DSF onto `referral_fee` drops the FBA half of its base; forcing the fuel surcharge onto `referral_fee` charges it against the wrong number entirely. Both **understate cost**, which **overstates profit** — risk #5, and the one direction of error this product cannot afford, since a user acts on the figure by spending their own money.
+
+`basis` therefore takes five values: `referral_fee`, `fulfilment_fee`, `selling_fees` (referral + fulfilment), `sell_price`, `flat`. `applies_to_categories?` joins `applies_to_countries?` as an optional scope. `ARCHITECTURE.md` §2.2 is amended to match; this is the only edit T08 makes to that document.
+
+This costs nothing today and would have cost a data migration later: nothing reads `surcharges` yet, because the pricing engine is T14. That is precisely the window in which to get the vocabulary right. It also does not touch the schema — `surcharges` is `jsonb` and `schema_a.sql`'s column comment names the keys without enumerating the basis values, so no migration is implied and none is added.
+
+**Decision 4 — T14 must implement every basis in the seeded data, and a missing one must fail loudly.**
+
+The corollary of decision 3, stated separately because it is a commitment against a future task rather than a description of this one. When `services/pricing/surcharges.ts` is written it must handle all five bases. A `default:` branch that skips an unrecognised basis, or treats it as `flat`, or applies it to `sell_price`, reintroduces exactly the understatement decision 3 exists to prevent — and it would do so silently, on every deal in the market, which is risk #2's shape. **An unknown basis must throw.** The seeded UK schedule is the fixture that makes this testable on day one: it contains a `selling_fees` and a `fulfilment_fee` entry, so an implementation that quietly ignores either produces a visibly wrong fee against a hand-worked example in T15.
+
+**Decision 5 — Pack prices are provisional planning values, and `stripe_price_id` stays NULL until T34.**
+
+`PRODUCT_SPEC.md` open question 3 leaves credit pricing undecided: it needs a number before Gate C, anchored against what comparable deal groups charge in the launch market. T08 nevertheless has to seed pack prices. The seeded GBP figures — £5.00 / £12.00 / £30.00 for 10 / 30 / 100 credits — are therefore **deliberate placeholders for a commercial decision, not the outcome of one**. The only property committed to is structural: the per-credit rate falls as the pack grows (50p, 40p, 30p).
+
+Being wrong here is unusually cheap, and the reason is ADR-0010 decision 4 rather than luck. `stripe_price_id` is NULL on all six rows — no Stripe object exists, and a placeholder such as `price_TODO` is prohibited because it satisfies every `IS NOT NULL` check, is indistinguishable from a real id on inspection, and fails at the Checkout call rather than at seed time. T06 exposes a price only where `active = true AND stripe_price_id IS NOT NULL`, so **no client can read any of these rows**. A repricing before T34 changes a number in one seed file and nothing else.
+
+The EUR rows are set independently rather than FX-converted, per §2.3: a price converted from a base currency lands on an odd local number and reads as an afterthought.
+
+**Consequences.**
+
+- **`ARCHITECTURE.md` §2.2's surcharge line is amended and nothing else in that document changes.** The `deals.surcharges` row in §2.4 describes the *itemised output* on a computed deal (`[{code,label,amount_minor}]`), which is a different shape from a schedule's *rules*, and it is correct as written.
+- **T14 and T15 inherit decision 4 as a hard requirement.** All five bases, and an unknown basis throws. `min_fee_minor` and the `flat`/`threshold`/`marginal` distinction on referral rules are the same class of obligation: on a £60 item under a "15% up to £45, then 9%" rule, `marginal` gives £8.10 and `threshold` gives £5.40, so the mode is stored explicitly on every rule and must never be inferred.
+- **T34 owns `stripe_price_id` from the moment it backfills.** `0008_credit_packs.sql` deliberately excludes that column from its `ON CONFLICT ... DO UPDATE`, so re-running the seed after a backfill cannot reset a live price to NULL and silently un-buy every pack. Verified by simulating a backfill and re-running.
+- **The credits page shows no purchasable pack until T34, and that is correct.** It must not be "fixed" with a placeholder.
+- **`verified_at` is load-bearing and is NULL where no claim can be made.** GB's tax and fee schedules carry it because the rates were read from `gov.uk` and Amazon's own rate card; DE's carry NULL because they were not verified against a primary source. `MARKET_PLAYBOOK.md` gates a live market on a non-NULL `verified_at`, which makes the column a check rather than a note — and makes fabricating one a way to defeat the gate.
+- **Five founder-verification items remain open on the launch market** and are listed in `MARKET_PLAYBOOK.md` §4.1: the 2024-08-01 `marketplace_fees_taxed` boundary and the 2% DSF rate are corroborated from secondary sources and need confirming against a real Seller Central invoice; the rate card and `sell.amazon.co.uk` disagree on whether the £0.25 minimum referral fee has category exemptions; Low-Price FBA and the Clothing Prime-selection referral ladder are not modelled. None blocks T09; all block beta.
+- **T09 gets the fixtures its criteria require.** Inactive countries (DE, US, JP), a non-live market (`de-amazon-de`) and inactive pack prices (the EUR rows) all exist as seeded rows, so "inactive rows are absent" can be asserted against something real rather than assumed.
+- **T08 seed data was deliberately NOT applied to the hosted development project.** It is the deterministic baseline for local and ephemeral CI databases. `supabase db push` does not carry seeds — it requires an explicit `--include-seed` — so the separation is the tool's default rather than a convention to remember.
+- **Two pre-existing test assertions were whole-table counts that assumed empty reference tables**, and T08's seed is the first thing that ever put rows in them. Both were rescoped to their own fixtures rather than relaxed: the claims being made were about fixture rows resolving independently, never about how many rows the database happens to hold.
