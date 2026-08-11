@@ -27,7 +27,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog, pg_temp;
 
-select plan(152);
+select plan(156);
 
 -- ---------------------------------------------------------------------------
 -- Helpers: run a statement AS another role and report the mechanism
@@ -822,11 +822,21 @@ select ok(
 
 -- T05 adds no trigger here. T06 owns the restricted-UPDATE trigger, and two
 -- triggers with one purpose means either can be dropped with no test going red.
+-- Updated by T06, which added exactly the one trigger this comment predicted.
+-- Asserting ONE and naming it is the assertion that keeps the "two triggers
+-- with one purpose" trap closed: a second guard here would let either be
+-- dropped with no test going red.
 select is(
   (select count(*)::int from pg_trigger
     where tgrelid = 'public.stripe_webhook_events'::regclass and not tgisinternal),
-  0,
-  'T05 adds no trigger to stripe_webhook_events — the restricted-UPDATE trigger is T06''s');
+  1,
+  'stripe_webhook_events carries exactly one trigger — T05 added none, T06 added the restricted-UPDATE guard');
+
+select is(
+  (select tgname::text from pg_trigger
+    where tgrelid = 'public.stripe_webhook_events'::regclass and not tgisinternal),
+  'stripe_webhook_events_restricted_update',
+  'and it is T06''s restricted-UPDATE trigger by name — not a blanket immutability guard, which would break T35''s fulfilment path');
 
 select ok(
   not has_table_privilege('service_role', 'public.stripe_webhook_events', 'DELETE'),
@@ -1012,46 +1022,84 @@ select is(
   0,
   'and no table in public has RLS disabled');
 
+-- Updated by T06. Rescoped to Schema C's own tables: two of the eight are
+-- opened for public read, one for own-row read, and the remaining five carry no
+-- policy at all — including stripe_webhook_events, which gained a trigger in
+-- T06 but never a policy or a grant.
+select bag_eq(
+  $$select tablename::text || ':' || cmd::text from pg_policies
+     where schemaname = 'public'
+       and tablename in ('credit_packs', 'credit_pack_prices', 'credit_ledger',
+                         'credit_purchases', 'stripe_webhook_events',
+                         'api_usage_log', 'ingestion_runs', 'app_events')$$,
+  $$values ('credit_packs:SELECT'), ('credit_pack_prices:SELECT'),
+           ('credit_ledger:SELECT')$$,
+  'exactly three Schema C policies exist after T06, all SELECT — and credit_ledger has no write policy of any kind');
+
 select is(
-  (select count(*)::int from pg_policies where schemaname = 'public'),
+  (select count(*)::int from pg_policies
+    where schemaname = 'public'
+      and tablename in ('credit_purchases', 'stripe_webhook_events',
+                        'api_usage_log', 'ingestion_runs', 'app_events')),
   0,
-  'no RLS policy exists yet — policies and their grants both land in T06');
+  'and the five service-role-only Schema C tables carry none');
 
 -- ---------------------------------------------------------------------------
 -- M. Privileges: the T03 baseline, plus the two ADR-0010 narrowings
 -- ---------------------------------------------------------------------------
+
+-- Updated by T06. The Schema C grant surface is now an exact allowlist rather
+-- than "nothing": three tables, SELECT only, and five tables still holding
+-- nothing at all. Every entry below is paired with a policy asserted above.
+select bag_eq(
+  $$select grantee::text || ':' || table_name::text || ':' || privilege_type::text
+      from information_schema.role_table_grants
+     where table_schema = 'public'
+       and grantee in ('anon', 'authenticated')
+       and table_name in ('credit_packs', 'credit_pack_prices', 'credit_ledger',
+                          'credit_purchases', 'stripe_webhook_events',
+                          'api_usage_log', 'ingestion_runs', 'app_events')$$,
+  $$values ('anon:credit_packs:SELECT'), ('authenticated:credit_packs:SELECT'),
+           ('anon:credit_pack_prices:SELECT'), ('authenticated:credit_pack_prices:SELECT'),
+           ('authenticated:credit_ledger:SELECT')$$,
+  'the Schema C grant surface is exactly five SELECT grants — and credit_ledger is authenticated-only, with no INSERT, UPDATE or DELETE to anyone');
 
 select is(
   (select count(*)::int
      from information_schema.role_table_grants
     where table_schema = 'public'
       and grantee in ('anon', 'authenticated')
-      and table_name in ('credit_packs', 'credit_pack_prices', 'credit_ledger',
-                         'credit_purchases', 'stripe_webhook_events',
+      and table_name in ('credit_purchases', 'stripe_webhook_events',
                          'api_usage_log', 'ingestion_runs', 'app_events')),
   0,
-  'anon and authenticated hold no privilege of any kind on any Schema C table');
+  'payment history, raw webhook payloads and the operational logs grant anon and authenticated nothing');
+
+-- The two tables T06 opened, and the predicate that governs the second one. A
+-- grant without its predicate would be an ungoverned privilege, so the grant
+-- and the policy predicate are asserted together.
+select ok(
+  has_table_privilege('anon', 'public.credit_packs', 'SELECT'),
+  'anon can now read credit_packs — T06 added the grant with credit_packs_select_public');
+
+select ok(
+  has_table_privilege('anon', 'public.credit_pack_prices', 'SELECT'),
+  'anon can now read credit_pack_prices — and the policy, not the grant, is what hides a NULL stripe_price_id row');
 
 select is(
-  (select count(*)::int
-     from information_schema.role_table_grants
-    where table_schema = 'public' and grantee in ('anon', 'authenticated')),
-  0,
-  'and the whole-schema baseline is unweakened — anon and authenticated still hold nothing anywhere');
-
--- The two tables T06 will open are still shut. A grant that arrived early would
--- be an ungoverned privilege: the read predicate does not exist yet.
-select ok(
-  not has_table_privilege('anon', 'public.credit_packs', 'SELECT'),
-  'anon cannot read credit_packs — the public-read grant lands in T06 with its policy');
+  (select qual from pg_policies
+    where schemaname = 'public' and tablename = 'credit_pack_prices'),
+  '(active AND (stripe_price_id IS NOT NULL))',
+  'and that predicate is exactly ADR-0010 decision 4 — the fixture rows above, seeded NULL as T08 will seed them, are therefore invisible');
 
 select ok(
-  not has_table_privilege('anon', 'public.credit_pack_prices', 'SELECT'),
-  'anon cannot read credit_pack_prices — a NULL stripe_price_id row must not be visible before T06''s predicate exists');
+  has_table_privilege('authenticated', 'public.credit_ledger', 'SELECT'),
+  'authenticated can now read its own ledger — T06 added the SELECT grant with credit_ledger_select_own');
 
 select ok(
-  not has_table_privilege('authenticated', 'public.credit_ledger', 'SELECT'),
-  'authenticated cannot yet read its own ledger — the SELECT grant arrives in T06 with the policy that governs it');
+  not has_table_privilege('authenticated', 'public.credit_ledger', 'INSERT')
+  and not has_table_privilege('authenticated', 'public.credit_ledger', 'UPDATE')
+  and not has_table_privilege('authenticated', 'public.credit_ledger', 'DELETE'),
+  'and SELECT is all it gained — the ledger is unwritable from the client at the grant layer, not merely unpolicied');
 
 select ok(
   not has_table_privilege('anon', 'public.credit_purchases', 'SELECT'),
@@ -1114,6 +1162,7 @@ select is(
     where n.nspname = 'public'
       and p.proname not in ('set_updated_at', 'handle_new_user',
                             'enforce_deal_lifecycle', 'enforce_credit_ledger_append_only',
+                            'enforce_webhook_event_restricted_update',
                             '_sqlstate_as', '_scalar_as')),
   0,
   'Schema C added exactly one function, the append-only trigger function');

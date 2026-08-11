@@ -17,33 +17,45 @@ select plan(26);
 -- A. anon and authenticated hold no DML on any Schema A table
 -- ---------------------------------------------------------------------------
 
+-- Rescoped by T06, which is the task chartered to open the first grants. The
+-- T03 baseline claim is unchanged where it still applies — the eleven Schema A
+-- tables that T06 did NOT open still grant these roles nothing — and the
+-- eleven tables T06 did open are enumerated by name in
+-- rls_policies_and_grants.test.sql, each next to the policy that governs it.
 select is(
   (select count(*)::int
      from information_schema.role_table_grants
     where table_schema = 'public'
       and grantee = 'anon'
-      and privilege_type in ('SELECT', 'INSERT', 'UPDATE', 'DELETE')),
+      and table_name in ('marketplaces', 'tax_schedules', 'fee_schedules',
+                         'profiles', 'retailers', 'retailer_products',
+                         'marketplace_products', 'product_matches')),
   0,
-  'anon holds no SELECT, INSERT, UPDATE or DELETE on any public table');
+  'anon holds no privilege on any Schema A table outside the three T06 opened for public read');
 
 select is(
   (select count(*)::int
      from information_schema.role_table_grants
     where table_schema = 'public'
       and grantee = 'authenticated'
-      and privilege_type in ('SELECT', 'INSERT', 'UPDATE', 'DELETE')),
+      and table_name in ('marketplaces', 'tax_schedules', 'fee_schedules',
+                         'retailers', 'retailer_products',
+                         'marketplace_products', 'product_matches')),
   0,
-  'authenticated holds no SELECT, INSERT, UPDATE or DELETE on any public table');
+  'authenticated likewise — including marketplaces, which ADR-008 kept closed');
 
 -- Not even the incidental ones. REFERENCES, TRIGGER, TRUNCATE and MAINTAIN are
--- the local stack's default and were never wanted.
+-- the local stack's default and were never wanted. This one is unchanged in
+-- scope: T06 granted only SELECT, INSERT, UPDATE and DELETE, so a privilege of
+-- any other type anywhere in public is still residue and still a defect.
 select is(
   (select count(*)::int
      from information_schema.role_table_grants
     where table_schema = 'public'
-      and grantee in ('anon', 'authenticated')),
+      and grantee in ('anon', 'authenticated')
+      and privilege_type not in ('SELECT', 'INSERT', 'DELETE')),
   0,
-  'anon and authenticated hold no table privilege of any kind in public');
+  'anon and authenticated hold no TRUNCATE, REFERENCES, TRIGGER or MAINTAIN anywhere in public — and no whole-table UPDATE either');
 
 -- Spot-checks through the privilege functions rather than the view, because
 -- these are what PostgreSQL actually consults.
@@ -253,11 +265,28 @@ select is(
   0,
   'no role inherits EXECUTE on future functions automatically');
 
--- RLS is untouched by this migration and must stay untouched.
+-- RLS is untouched by this migration and must stay untouched. T06 added the
+-- policies this comment anticipated, so the assertion becomes the pairing rule
+-- ADR-004 decision 4 states: after T06 there is no table anywhere in public
+-- holding a grant to these roles without a policy, or a policy without a grant.
+-- That is the property T03's normalisation existed to make checkable, and it is
+-- checked here over the whole schema rather than table by table.
 select is(
-  (select count(*)::int from pg_policies where schemaname = 'public'),
+  (select count(*)::int
+     from pg_class c
+     join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relkind = 'r'
+      -- This file's own probe tables, created above to prove that a trigger
+      -- fires without EXECUTE. They are granted deliberately and have no policy
+      -- because they are not part of the schema; they are dropped with the
+      -- transaction.
+      and c.relname not like '\_trigger\_probe\_%'
+      and exists (select 1 from information_schema.column_privileges cp
+                   where cp.table_schema = 'public' and cp.table_name = c.relname
+                     and cp.grantee in ('anon', 'authenticated'))
+        <> exists (select 1 from pg_policy p where p.polrelid = c.oid)),
   0,
-  'normalising privileges added no RLS policy — those belong to T06');
+  'every public table either has both a grant and a policy for these roles, or neither — no inert policy and no ungoverned privilege');
 
 select * from finish();
 

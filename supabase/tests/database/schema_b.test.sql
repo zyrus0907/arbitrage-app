@@ -15,7 +15,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog, pg_temp;
 
-select plan(139);
+select plan(142);
 
 -- ---------------------------------------------------------------------------
 -- A. The five tables exist, and nothing marketplace-specific arrived with them
@@ -1265,24 +1265,65 @@ select is(
   0,
   'and no table in public has RLS disabled');
 
+-- Updated by T06, which added the first policies. Rescoped to Schema B's own
+-- tables rather than deleted: `deals` must still carry none, because §6.3
+-- chose server-side redaction over column-level RLS, and the four user-owned
+-- tables carry exactly the policies T06 defines.
 select is(
-  (select count(*)::int from pg_policies where schemaname = 'public'),
+  (select count(*)::int from pg_policies
+    where schemaname = 'public' and tablename = 'deals'),
   0,
-  'no RLS policy exists yet — policies and their grants both land in T06');
+  'deals carries no RLS policy after T06 either — it is closed at the grant layer and redacted server-side (§6.3, risk #10)');
+
+select bag_eq(
+  $$select tablename::text || ':' || cmd::text from pg_policies
+     where schemaname = 'public'
+       and tablename in ('deal_unlocks', 'watchlist_items',
+                         'purchase_records', 'barcode_lookups')$$,
+  $$values ('deal_unlocks:SELECT'), ('deal_unlocks:INSERT'),
+           ('watchlist_items:SELECT'), ('watchlist_items:INSERT'), ('watchlist_items:DELETE'),
+           ('purchase_records:SELECT'), ('purchase_records:INSERT'), ('purchase_records:DELETE'),
+           ('barcode_lookups:SELECT'), ('barcode_lookups:INSERT'), ('barcode_lookups:DELETE')$$,
+  'the four user-owned Schema B tables carry exactly T06''s policies — and deal_unlocks has no DELETE, because unlocks are permanent (AC10.7)');
 
 -- ---------------------------------------------------------------------------
 -- T. Privileges: the T03 baseline is not weakened (ADR-004, global rule 8)
 -- ---------------------------------------------------------------------------
 
+-- Updated by T06. `deals` is still absolutely closed; the four user-owned
+-- tables now hold exactly the per-operation grants their policies require, and
+-- nothing wider. Enumerated as role/table/privilege triples so that a widened
+-- grant — an UPDATE appearing, or anon gaining anything — fails here.
 select is(
   (select count(*)::int
      from information_schema.role_table_grants
     where table_schema = 'public'
       and grantee in ('anon', 'authenticated')
-      and table_name in ('deals', 'deal_unlocks', 'watchlist_items',
+      and table_name = 'deals'),
+  0,
+  'anon and authenticated hold no privilege of any kind on deals');
+
+select is(
+  (select count(*)::int
+     from information_schema.role_table_grants
+    where table_schema = 'public'
+      and grantee = 'anon'
+      and table_name in ('deal_unlocks', 'watchlist_items',
                          'purchase_records', 'barcode_lookups')),
   0,
-  'anon and authenticated hold no privilege of any kind on any Schema B table');
+  'and anon holds nothing on the user-owned tables either — every T06 policy there is scoped TO authenticated');
+
+select bag_eq(
+  $$select table_name::text || ':' || privilege_type::text
+      from information_schema.role_table_grants
+     where table_schema = 'public' and grantee = 'authenticated'
+       and table_name in ('deal_unlocks', 'watchlist_items',
+                          'purchase_records', 'barcode_lookups')$$,
+  $$values ('deal_unlocks:SELECT'), ('deal_unlocks:INSERT'),
+           ('watchlist_items:SELECT'), ('watchlist_items:INSERT'), ('watchlist_items:DELETE'),
+           ('purchase_records:SELECT'), ('purchase_records:INSERT'), ('purchase_records:DELETE'),
+           ('barcode_lookups:SELECT'), ('barcode_lookups:INSERT'), ('barcode_lookups:DELETE')$$,
+  'authenticated holds exactly T06''s per-operation grants on the four user-owned tables — no UPDATE anywhere, no DELETE on deal_unlocks');
 
 select ok(
   not has_table_privilege('anon', 'public.deals', 'SELECT'),
@@ -1292,9 +1333,12 @@ select ok(
   not has_table_privilege('authenticated', 'public.deals', 'SELECT'),
   'authenticated cannot select from deals either — redaction is server-side (§6.3, risk #10)');
 
+-- Updated by T06: the grant arrived, with the policy that governs it. The
+-- assertion flips rather than disappearing, because "the grant exists" is the
+-- half of the pair that an inert policy would fail.
 select ok(
-  not has_table_privilege('authenticated', 'public.watchlist_items', 'SELECT'),
-  'authenticated cannot yet read its own watchlist — the grant arrives in T06 with the policy that governs it');
+  has_table_privilege('authenticated', 'public.watchlist_items', 'SELECT'),
+  'authenticated now holds SELECT on watchlist_items — T06 added it together with watchlist_items_select_own');
 
 select is(
   (select count(*)::int
@@ -1336,6 +1380,7 @@ select is(
     where n.nspname = 'public'
       and p.proname not in ('set_updated_at', 'handle_new_user',
                             'enforce_deal_lifecycle', 'enforce_credit_ledger_append_only',
+                            'enforce_webhook_event_restricted_update',
                             '_deal_sql')),
   0,
   'Schema B added exactly one function, the lifecycle trigger function');

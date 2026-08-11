@@ -601,10 +601,15 @@ select ok(
     where n.nspname = 'public' and c.relname = 'fee_schedules'),
   'RLS is still enabled on fee_schedules');
 
+-- Rescoped by T06, which added the schema's first policies. T05A's claim is
+-- unchanged in substance: the two schedule tables are service-role-only per
+-- §6.3, and neither gained a policy.
 select is(
-  (select count(*)::int from pg_policies where schemaname = 'public'),
+  (select count(*)::int from pg_policies
+    where schemaname = 'public'
+      and tablename in ('tax_schedules', 'fee_schedules')),
   0,
-  'no RLS policy exists anywhere in public — T05A adds none, and both schedule tables are service-role-only per §6.3');
+  'neither schedule table carries an RLS policy — T05A added none and T06 left both closed, per §6.3');
 
 select is(
   (select count(*)::int
@@ -622,11 +627,17 @@ select is(
 -- because "the migration only adds constraints" is exactly the claim a stray
 -- GRANT would hide behind.
 
+-- Rescoped by T06 for the same reason. The two schedule tables still grant
+-- anon and authenticated nothing, which is the claim this section is actually
+-- about; the whole-schema count now belongs to rls_policies_and_grants.test.sql,
+-- which enumerates the eleven tables T06 opened by name.
 select is(
   (select count(*)::int from information_schema.role_table_grants
-    where table_schema = 'public' and grantee in ('anon', 'authenticated')),
+    where table_schema = 'public'
+      and grantee in ('anon', 'authenticated')
+      and table_name in ('tax_schedules', 'fee_schedules')),
   0,
-  'anon and authenticated still hold no table privilege of any kind in public');
+  'anon and authenticated hold no table privilege of any kind on either schedule table');
 
 select ok(
   not has_table_privilege('anon', 'public.tax_schedules', 'SELECT'),

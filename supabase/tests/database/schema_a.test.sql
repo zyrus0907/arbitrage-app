@@ -13,7 +13,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog, pg_temp;
 
-select plan(49);
+select plan(50);
 
 -- ---------------------------------------------------------------------------
 -- A. The tables that must exist, and the one that must not
@@ -66,10 +66,31 @@ select is(
   0,
   'no public table has RLS disabled');
 
+-- Updated by T06, which is the task chartered to add the first policies. The
+-- assertion is rescoped rather than deleted: it now names the exact Schema A
+-- tables T06 opened and asserts that every other Schema A table still carries
+-- no policy at all. `marketplaces` is the one to watch — ADR-008 removed it
+-- from the public-read set, and it is reference data, which is precisely the
+-- argument someone will use to re-add it.
+select bag_eq(
+  $$select tablename::text from pg_policies
+     where schemaname = 'public'
+       and tablename in ('countries', 'currencies', 'marketplaces', 'markets',
+                         'tax_schedules', 'fee_schedules', 'profiles',
+                         'retailers', 'retailer_products', 'marketplace_products',
+                         'product_matches')$$,
+  $$values ('countries'), ('currencies'), ('markets'),
+           ('profiles'), ('profiles')$$,
+  'exactly four Schema A tables carry policies after T06 — the three public reference tables and profiles (which has two, SELECT and UPDATE)');
+
 select is(
-  (select count(*)::int from pg_policies where schemaname = 'public'),
+  (select count(*)::int from pg_policies
+    where schemaname = 'public'
+      and tablename in ('marketplaces', 'tax_schedules', 'fee_schedules',
+                        'retailers', 'retailer_products', 'marketplace_products',
+                        'product_matches')),
   0,
-  'no RLS policy exists yet — every table is unreachable by anon and authenticated (T06 adds policies)');
+  'and the seven service-role-only Schema A tables still carry none — marketplaces included (ADR-008)');
 
 -- ---------------------------------------------------------------------------
 -- C. Currency exponents are data, not an assumed x100 (§2.2)

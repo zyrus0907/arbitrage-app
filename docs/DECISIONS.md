@@ -761,3 +761,41 @@ T05A's acceptance criteria ask the migration to note that extension objects are 
 - **The constraints govern `UPDATE` as well as `INSERT`**, which is the path T33 takes. Both directions are tested.
 - **No supporting index was added.** Each `EXCLUDE` *is* a GiST index on `(key, range)` — the index the resolution query wants — so a second btree would be dead weight.
 - **`ARCHITECTURE.md` §2.2's temporal convention** is unchanged in substance; only its implied range type is amended, above.
+
+---
+
+## ADR-0013 — The first public surface: what "public reference data" actually means, and what an activity row proves
+
+**Status:** Accepted · T06 · 2026-08-11 · implements ADR-004 and ADR-008 · amends ADR-008 and `TASKS.md` T06 on one point, narrows another · touches no T01–T05A outcome
+
+**Context.** T06 opened the schema's first `anon`/`authenticated` surface: 19 policies, 16 grants, 13 tables deliberately left closed. Almost all of it was already specified — ADR-004 fixed the pairing rule, ADR-008 fixed the exposure set, ADR-0010 fixed the `credit_pack_prices` predicate and the webhook rule. Three things were not, and each only becomes visible once the policies are being written against the columns that actually exist.
+
+**Decision 1 — `currencies` is public in full, because there is nothing to filter on.**
+
+ADR-008's table and `TASKS.md` T06 both say `currencies` is readable "active rows only". The table has no `active` column: `ARCHITECTURE.md` §2.2 defines it as `code, minor_unit_exponent, symbol, name`, and T03 built exactly that. The predicate is therefore `USING (true)` — the only unqualified predicate anywhere in the schema, and the one place a reviewer should expect to find one.
+
+This is a correction to the wording of ADR-008 rather than a widening of its intent. The intent was "the client may read the reference rows it needs to render a price"; `currencies` is the ISO 4217 list, every column of it is public knowledge, and the grant is `SELECT` alone. What makes the exception safe is that it is *checkable*: the suite asserts both that `currencies` is the only table with a `true` predicate and that the table genuinely has no `active` column, so the day someone adds one, the second assertion fails and the policy must be narrowed in the same migration. An unqualified predicate that no test distinguishes from a forgotten one is the actual hazard, and that is what is closed here.
+
+Rejected: inventing an `active` column to satisfy the sentence. A flag with one possible value is not a security boundary, it is a column that future code will branch on for no reason.
+
+**Decision 2 — `markets` is public only where `active = true AND launch_status = 'live'`.**
+
+Three documents describe this predicate three ways. `ARCHITECTURE.md` §6.3 says `active = true`. ADR-008 and `TASKS.md` T06 say "active/live rows only". §5.3 documents the endpoint the policy backs as "Live markets (public — drives signup)". The narrowest reading is taken, on the principle that a security boundary resolves ambiguity downward: a predicate that is too narrow produces a visible absence, and a predicate that is too wide produces a market a user can select before it can serve them.
+
+The consequence is intended and is the reason the narrow reading is also the *correct* one, not merely the safe one. A `beta` or `planned` market is invisible to `anon` and `authenticated`, so a user in that country is waitlisted — which is precisely AC2.2 and AC8.6, and precisely what risk #7's "all boxes ticked or the market stays `planned`" is for. `active` alone would have let a market that is configured but not launched appear in the signup picker, and "an empty feed is worse than an honest not-live-here-yet" (§6.1) is the whole argument against that. Server-side reads run as `service_role` and are unaffected, so the admin console and the ingestion pipeline still see every market.
+
+**Decision 3 — A `deal_unlocks` or `barcode_lookups` row is not evidence that credits were spent. The ledger is.**
+
+T06 requires `authenticated` to hold `INSERT` on both tables, governed by `WITH CHECK (user_id = auth.uid())`. That predicate constrains *whose* row it is and nothing else on it, so a client holding the grant can insert an unlock row with `credits_spent = 0`. This is not a defect in the policy — the policy is exactly what T06 specifies, and a narrower one would have to encode a payment rule in a row filter — but it is a fact about what these tables mean, and it has to be written down before T07 reads them.
+
+**These tables are activity records, not financial records.** The financial record is `credit_ledger`, which no client can write at either layer: `authenticated` holds `SELECT` alone, there is no write policy of any kind, and the only sanctioned writer is T07's `SECURITY DEFINER` RPC running as owner.
+
+It leaks nothing today. `deals` is unreadable by `authenticated` at the grant layer, so a self-inserted unlock row unlocks nothing; entitlement is resolved server-side by the unlock route, which is where redaction lives (§6.3).
+
+**Consequences.**
+
+- **T07 must derive entitlement and balance from `credit_ledger` and `profiles.credit_balance`, never from the presence of a `deal_unlocks` row.** `spend_credits` + `insert deal_unlocks` in one transaction (§6.5) remains correct: the ledger row is what makes the unlock real, and the unlock row is the index into it. A future "have they already unlocked this?" check that reads `deal_unlocks` alone is answering a cheaper question than it thinks — acceptable for AC10.2's no-double-charge path, which is idempotency rather than authorisation, and not acceptable for anything that grants access.
+- **T09 inherits three assertions** it would otherwise have to infer: that `currencies` is the only unqualified predicate, that a `beta` market is invisible to both client roles, and that `deal_unlocks.credits_spent` is unconstrained by RLS.
+- **T10** may not assume a user can delete their own unlock history. `deal_unlocks` has neither a DELETE grant nor a DELETE policy (AC10.7), so account deletion reaches it only by cascade from `auth.users`.
+- **`ARCHITECTURE.md` §6.3's policy table** is accurate for `markets` as amended here; its `currencies` row is amended by decision 1.
+- **If a client need for an inactive currency or a non-live market emerges**, it is a view with named columns, not a widened policy — the same rule ADR-008 set for `marketplaces`.
