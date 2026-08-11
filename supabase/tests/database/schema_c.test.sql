@@ -1163,6 +1163,8 @@ select is(
       and p.proname not in ('set_updated_at', 'handle_new_user',
                             'enforce_deal_lifecycle', 'enforce_credit_ledger_append_only',
                             'enforce_webhook_event_restricted_update',
+                            'spend_credits', 'grant_credits',
+                            'credit_ledger_idempotent_match',
                             '_sqlstate_as', '_scalar_as')),
   0,
   'Schema C added exactly one function, the append-only trigger function');

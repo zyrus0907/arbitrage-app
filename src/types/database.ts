@@ -1612,7 +1612,61 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      credit_ledger_idempotent_match: {
+        Args: {
+          p_delta: number
+          p_idem: string
+          p_reason: Database["public"]["Enums"]["credit_reason"]
+          p_ref_id: string
+          p_ref_type: string
+          p_user: string
+        }
+        Returns: {
+          balance_after: number
+          created_at: string
+          delta: number
+          id: string
+          idempotency_key: string
+          reason: Database["public"]["Enums"]["credit_reason"]
+          ref_id: string | null
+          ref_type: string | null
+          user_id: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "credit_ledger"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      grant_credits: {
+        Args: {
+          p_amount: number
+          p_idem: string
+          p_reason: Database["public"]["Enums"]["credit_reason"]
+          p_ref_id: string
+          p_ref_type: string
+          p_user: string
+        }
+        Returns: {
+          ledger_id: string
+          new_balance: number
+        }[]
+      }
+      spend_credits: {
+        Args: {
+          p_amount: number
+          p_idem: string
+          p_reason: Database["public"]["Enums"]["credit_reason"]
+          p_ref_id: string
+          p_ref_type: string
+          p_user: string
+        }
+        Returns: {
+          ledger_id: string
+          new_balance: number
+        }[]
+      }
     }
     Enums: {
       component_band: "low" | "medium" | "high"

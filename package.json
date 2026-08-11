@@ -20,7 +20,7 @@
     "db:new": "supabase migration new",
     "db:list": "supabase migration list",
     "db:reset": "supabase db reset",
-    "db:test": "supabase test db",
+    "db:test": "node scripts/db-test.mjs",
     "db:push": "supabase db push",
     "db:diff": "supabase db diff",
     "db:types": "supabase gen types typescript --linked --schema public > src/types/database.ts",

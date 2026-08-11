@@ -799,3 +799,61 @@ It leaks nothing today. `deals` is unreadable by `authenticated` at the grant la
 - **T10** may not assume a user can delete their own unlock history. `deal_unlocks` has neither a DELETE grant nor a DELETE policy (AC10.7), so account deletion reaches it only by cascade from `auth.users`.
 - **`ARCHITECTURE.md` §6.3's policy table** is accurate for `markets` as amended here; its `currencies` row is amended by decision 1.
 - **If a client need for an inactive currency or a non-live market emerges**, it is a view with named columns, not a widened policy — the same rule ADR-008 set for `marketplaces`.
+
+---
+
+## ADR-0014 — The credit RPCs: which function may take a balance negative, and what an idempotency key identifies
+
+**Status:** Accepted · T07 · 2026-08-11 · implements ADR-004, ADR-0010 and ADR-0013 · amends `ARCHITECTURE.md` §6.5 on one point · changes no T05 or T06 outcome
+
+**Context.** T07 specifies `spend_credits` and `grant_credits` down to their ordering, their `SECURITY DEFINER` posture and their privilege statements, so most of this task had its decisions made for it. Four things were not decided anywhere, and each is the kind of thing that is invisible until the function is being written against the columns that actually exist.
+
+**Decision 1 — `p_reason` is `public.credit_reason`, not `text`.**
+
+`ARCHITECTURE.md` §6.5 sketches the signature with `p_reason text`. The column it is written to is the `credit_reason` enum, and a `text` parameter would make the function's accepted input wider than its own storage — the cast would fail eventually, but one statement later, inside the insert, with an error about a column rather than about an argument. The enum is taken instead: PostgREST resolves a JSON string to it without ceremony, an unknown reason fails at the call boundary with `22P02`, and the function's contract and the table's contract are the same set of values by construction rather than by agreement.
+
+This is a correction to a sketch rather than a change of intent. §6.5's block is explicitly a comment-annotated outline, and every other element of it — the parameter order, the return shape, the `FOR UPDATE`, the raise — is implemented exactly as written.
+
+**Decision 2 — `grant_credits` takes a SIGNED amount, and it is the only function that may end below zero.**
+
+T07 says `grant_credits` "permits a negative resulting balance (refunds and chargebacks, §9.2)". Read literally against a positive-only amount, that sentence cannot be satisfied: adding a positive number to a non-negative balance never produces a negative one. The sentence is only meaningful if `grant_credits` accepts a negative amount, and §9.2 rule 4 names exactly what that case is — a Stripe reversal clawing credits back under reason `chargeback`, with AC17.5 requiring the balance to go negative rather than the operation to fail.
+
+So the split is by DIRECTION OF AUTHORITY, not by sign of intent:
+
+| | `spend_credits` | `grant_credits` |
+|---|---|---|
+| `p_amount` | `> 0`, written as `delta = -p_amount` | signed, non-zero, written as `delta = p_amount` |
+| reasons | `unlock_deal`, `barcode_lookup` | `signup_grant`, `purchase`, `refund`, `promo` (positive); `chargeback` (negative); `admin_adjust` (either) |
+| may end negative | **no** — `23514 INSUFFICIENT_CREDITS` | **yes** |
+
+`chargeback` is deliberately not routable through `spend_credits`. There it would meet the balance guard, and a payment reversal that fails because the user already spent the money is precisely the outcome AC17.5 forbids. Equally, no consumption reason is routable through `grant_credits`, because that function does not check the balance at all — accepting `unlock_deal` there would be a documented way to unlock a deal with no credits.
+
+The per-reason direction rules restate at the writer what `credit_ledger_reversal_direction` already enforces for `refund` and `chargeback`, and extend it to the four reasons ADR-0010 decision 1 deliberately left unconstrained at the storage layer so that `admin_adjust` could stay signed. **The table constraint is not weakened and is not now redundant:** the suite asserts that a negative `refund` and a positive `chargeback` are still refused by an owner's direct `INSERT`, so T07 did not become the only thing standing between a reversed sign and the ledger.
+
+Rejected: one function with a signed amount and a `p_allow_negative` flag. A boolean that decides whether the balance guard applies is the guard, and it would be supplied by the caller.
+
+**Decision 3 — An idempotency key identifies an OPERATION, not a request. Conflicting reuse is rejected.**
+
+T07 requires that an existing key returns the prior result and does not double-charge. It does not say what happens when a key is reused for a *different* operation, and the unique constraint alone cannot tell the difference.
+
+Identity is `(user_id, delta, reason, ref_type, ref_id)`. An exact match replays the recorded `(balance_after, id)`; anything else raises `23505 IDEMPOTENCY_KEY_CONFLICT`. Two properties follow, and both are asserted:
+
+- **A replay returns the RECORDED result, not the live balance.** If the account has moved on since, the answer to "what did this operation do" has not. A replay is therefore deterministic for the life of the row, which is what makes it safe for a client to retry indefinitely.
+- **Silently returning success for an operation that never happened is the failure mode being closed.** A webhook redelivered with a mutated amount, or a client that reuses a key across two different unlocks, gets an error rather than a fabricated receipt.
+
+`created_at` and `balance_after` are excluded from the comparison: they are outcomes of the first call, not inputs to it.
+
+**Decision 4 — A private helper exists, and it is granted to nobody.**
+
+`public.credit_ledger_idempotent_match` holds the single definition of decision 3's identity rule, which both RPCs need in two places each. Four inline copies of the predicate the whole no-double-charge guarantee rests on is four chances for it to drift. The helper is `SECURITY INVOKER` — it is only ever reached from inside a definer function already running as the owner, so definer rights it does not need are rights it does not get — and its ACL is `postgres=X/postgres` alone, not even `service_role`, since an execute grant on it would be a way to probe which idempotency keys exist.
+
+It is a third function in a task whose file list names two. Flagged rather than hidden: it appears in `supabase/functions/` alongside the two RPCs, in the T07 function inventory assertions, and in the generated `Functions` type (harmlessly — `gen types` introspects the catalogue, not privileges, so it advertises a function no role can call).
+
+**Consequences.**
+
+- **The RPCs are the only *sanctioned* writer, not yet the only *possible* one.** `service_role` retains `INSERT` on `credit_ledger` and `UPDATE` on `profiles` from T05 and T06, so server code can still move credits without them. T07's answer is the acceptance criterion "no check-then-deduct logic exists in application code", asserted statically in `tests/unit/supabase/credit-rpcs-are-the-only-writer.test.ts`. Turning the convention into a privilege means revoking those two grants — which these `SECURITY DEFINER` functions would survive unchanged, and which is the main reason they are `SECURITY DEFINER` at all, given that `service_role` needs no help from a definer function today. **Raised for T26**, not done here, because T08's seed and T35's purchase bookkeeping are unwritten and the blast radius is theirs to measure.
+- **§6.5's "same transaction" is not expressible over PostgREST.** `spend_credits` + `insert deal_unlocks` in one transaction (AC10.4) cannot be two `supabase-js` calls; PostgREST gives one statement per request. **T23 must choose** a wrapping RPC that does both, or a direct Postgres connection. T07 deliberately does not pre-empt that choice: folding a `deal_id` and a `market_id` into a credit primitive would make every future consumer of credits an edit to `spend_credits`.
+- **T08's signup grant and T35's webhook fulfilment both call `grant_credits`**, with `stripe_webhook_events.stripe_event_id` as the natural idempotency key for the latter — the second of §9.2 rule 3's two layers, now with a defined conflict behaviour.
+- **T09 inherits the privilege matrix as an assertion**: `spend_credits` and `grant_credits` are `postgres=X/postgres,service_role=X/postgres` exactly, and a NULL `proacl` on either is a `PUBLIC` execute grant on a credit-minting function.
+- **The concurrency gate is automated and is mutation-checked.** `supabase/tests/database/credit_rpcs_concurrency.test.sql` drives real concurrent sessions through `dblink`, because two sequential calls in one transaction prove arithmetic and would pass against a `spend_credits` with no `FOR UPDATE` in it. Deleting the `FOR UPDATE` was tried: the file fails fourteen assertions, with AC10.1 landing six successful unlocks and a balance of `-5` against a starting balance of `1`. That file commits its fixtures and removes them again, which is the one place in the suite where a test is not purely a rolled-back transaction, and it is documented in the file header.
+- **`npm run db:test` is now a wrapper, and that is a consequence of the concurrency gate rather than a preference.** `dblink` refuses a passwordless connection for a non-superuser; `dblink_connect_u`, which would not, is owned by `supabase_admin` and grants `postgres` no EXECUTE even when a migration creates the extension. A password is therefore unavoidable, and it must not be committed. `supabase test db` provides no way to pass one: it parses the connection URL into components and rebuilds the connection inside its own container, so `?options=-c …` is discarded (the session reports `application_name=psql`) and `PGOPTIONS` does not cross the container boundary. The only channel that survives is the database itself, so `scripts/db-test.mjs` publishes the local password as a database-level `t7.db_password` setting for the length of the run and removes it in a `finally`. The password never reaches argv, disk or any stream — the `ALTER DATABASE` goes to psql on stdin inside the container, over the socket the local stack trusts, and the one step needing superuser is the only reason `supabase_admin` is used at all. **The test file has no fallback:** an absent setting raises, because a test that substituted a default would pass only where the default happened to be right.
