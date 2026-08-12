@@ -455,3 +455,105 @@ The failure mode this exists to prevent is specific: financial defects are silen
 - [ ] `npm run db:reset && npm run db:test` — the financial tests run from empty, as a set.
 - [ ] The reconciliation invariant still holds after the change: `sum(credit_ledger.delta) == profiles.credit_balance` per user (§11.4, AC10.8).
 - [ ] Types regenerated against the **remote** database and committed with the migration.
+
+---
+
+## 11. Authentication, sessions and account deletion (T10)
+
+### 11.1 Local auth configuration
+
+`supabase/config.toml` `[auth]` drives the local stack. Two settings matter and
+one of them **differs from what production requires**:
+
+| Setting | Local value | What production needs |
+|---|---|---|
+| `site_url` | `http://localhost:3000` | the deployed origin |
+| `additional_redirect_urls` | localhost | the deployed origin + Vercel preview pattern |
+| `auth.email.enable_confirmations` | `false` | **`true`** — AC1.1 requires a verification email |
+| `minimum_password_length` | `6` | 8, to match the Zod schema the forms enforce |
+
+The application handles both confirmation settings without a code change: with
+confirmations on, `signUp` returns a user and no session and the user is sent to
+`/check-email`; with them off, the session is live immediately. Do not "fix" one
+by hardcoding the other.
+
+Emails on the local stack go to **Mailpit**, not to a real inbox:
+
+```bash
+npx supabase status
+```
+
+Open the `MAILPIT_URL` it prints to read a verification or magic link.
+
+### 11.2 Where the session lives
+
+- **httpOnly cookies, written by the server** (AC1.4). Authentication runs in
+  Server Actions rather than in the browser client precisely so the cookie
+  carries `httpOnly` — `@supabase/ssr`'s browser client uses cookies too, but
+  JavaScript-written ones that any injected script can read.
+- `sameSite` is **`lax`**, and must stay so: the magic-link and verification
+  flows return the user from their mail client as a cross-site top-level
+  navigation, and `strict` withholds the cookie on exactly that request.
+- Verify the flags without a browser:
+
+```bash
+curl -sD - -o /dev/null "http://localhost:3000/feed" | grep -i '^location'
+```
+
+### 11.3 Route protection
+
+`src/proxy.ts` — **not `middleware.ts`**; Next.js 16 renamed Middleware to Proxy
+(ADR-0017 decision 8). It refreshes the session and redirects a request with no
+session to `/sign-in?next=…`. It is **default-deny**: everything needs a session
+unless it appears in `PUBLIC_PATHS` in `src/lib/auth/routes.ts`.
+
+**Adding a public page means adding it to that list.** Forgetting produces a
+redirect to sign-in — visible and reported. The inverse arrangement would ship
+the page unprotected and silent, which is why the list is inverted.
+
+The proxy is not the authorization boundary. `src/app/(app)/layout.tsx`
+re-verifies with `getUser()` and applies the onboarding and tombstone gates, and
+RLS governs every row underneath.
+
+### 11.4 Deleting an account
+
+Two steps, in this order, both idempotent:
+
+```sql
+-- 1. Scrub. Deletes personal rows, tombstones the profile, retains the ledger.
+select * from public.pseudonymise_account('<user uuid>');
+```
+
+```sql
+-- 2. Remove the login. Refused by the guard trigger unless step 1 has run.
+-- In practice, do this through the Auth admin API, not SQL.
+```
+
+From the application, both steps are `DELETE /api/v1/account`, which acts on the
+verified session's user and accepts no user id.
+
+**What survives, and why:** `credit_ledger` and `credit_purchases` rows are
+retained untouched (ADR-0010, AC1.6) — a chargeback can arrive after an account
+closes, and a reconciliation a user can empty by closing their account proves
+nothing. `profiles.credit_balance` is **not** zeroed, because that would break
+AC10.8's invariant `sum(delta) = credit_balance` for exactly the rows §11.4
+requires reconciliation to keep covering.
+
+**What is deliberately unresolved:** the legal retention *duration*. The
+mechanism retains indefinitely. Settle the period with advice before beta and
+record it in the privacy policy (T37) — do not invent one in a column comment.
+
+**If a deletion half-completed** (the scrub ran, the auth deletion failed): the
+account is already unusable — the layout refuses a tombstoned profile — and
+re-running the same request finishes the job. Do not attempt to reverse it; the
+tombstone constraint refuses to accept personal data back onto the row.
+
+### 11.5 Checking for leaked secrets in the browser bundle
+
+```bash
+npm run build && npm run scan:bundle
+```
+
+Reads `.next/static` and fails on any server-only variable **name** or **value**,
+or on a `service_role` JWT claim. The source scan in `tests/unit/supabase/` is
+not a substitute: it cannot see what the compiler emitted.

@@ -76,11 +76,41 @@ describe('credits move only through the T07 RPCs', () => {
     // The shape §6.5 forbids: a balance read and an arithmetic comparison
     // against it in the same file. The RPC does this under a row lock; anything
     // above the database doing it is a race by construction.
+    //
+    // The comparison operator must be surrounded by whitespace (`balance < n`).
+    // Narrowed during T10, and narrowed rather than relaxed: the previous
+    // `[<>]=?` matched the `<` of a JSX closing tag, so simply DISPLAYING a
+    // balance — `{profile.credit_balance}</span>` in the settings page — was
+    // reported as a check-then-deduct race. A guard that fires on read-only
+    // rendering is one that gets suppressed the second time it happens, and
+    // then it is protecting nothing. A real comparison is still caught: see the
+    // negative-control test below, which proves this pattern has not been
+    // loosened into uselessness.
     const offenders = appSources.filter(
       ({ source }) =>
-        /credit_balance/.test(source) && /credit_balance\s*[\s\S]{0,40}?[<>]=?/.test(source),
+        /credit_balance/.test(source) && /credit_balance[\s\S]{0,40}?\s[<>]=?\s/.test(source),
     );
     expect(offenders.map((f) => f.path)).toEqual([]);
+  });
+
+  /**
+   * Negative control for the pattern above (added T10).
+   *
+   * A source-scanning guard fails silently: if the regex stops matching
+   * anything, every assertion built on it goes green forever and nobody
+   * notices. These fixtures are the check-then-deduct shapes the rule exists to
+   * catch, and they must still be caught — while the read-only rendering that
+   * caused the T10 false positive must not be.
+   */
+  it('still detects a real check-then-deduct, and still permits displaying a balance', () => {
+    const forbidden = /credit_balance[\s\S]{0,40}?\s[<>]=?\s/;
+
+    expect(forbidden.test('if (profile.credit_balance < amount) throw new Error();')).toBe(true);
+    expect(forbidden.test('const affordable = credit_balance >= cost;')).toBe(true);
+    expect(forbidden.test('if (row.credit_balance <= 0) return;')).toBe(true);
+
+    expect(forbidden.test('<span>{profile.credit_balance}</span>')).toBe(false);
+    expect(forbidden.test('const balance = profile.credit_balance;')).toBe(false);
   });
 });
 

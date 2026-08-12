@@ -705,11 +705,25 @@ describe('financial records survive account deletion attempts (ADR-0010)', () =>
   it('a user holding credit_ledger rows cannot be deleted', async () => {
     const { error } = await service.auth.admin.deleteUser(userA.id);
 
-    // ON DELETE RESTRICT on credit_ledger.user_id is what refuses this. T10
-    // owes the pseudonymisation that makes account deletion possible without
-    // destroying financial history; until then this is the correct behaviour
-    // and the reason this suite cannot fully tear itself down.
+    // RESCOPED IN T10 (ADR-0017), NOT DELETED — the outcome is unchanged and
+    // the MECHANISM has moved, which is worth saying because this suite's whole
+    // discipline is that a test must know why it passes.
+    //
+    // Before T10: `profiles` cascaded from `auth.users`, and credit_ledger's
+    // ON DELETE RESTRICT held the profile back, so the delete failed with
+    // 23503 two levels down.
+    //
+    // After T10: that cascade is gone, because retaining financial history
+    // requires retaining the profile row the FKs point at. The refusal now
+    // comes from an explicit BEFORE DELETE guard on `auth.users` that rejects
+    // any account whose profile still holds personal data — which is the rule
+    // the FK was always a proxy for. Without it, dropping the FK would have
+    // turned this loud failure into a silent orphaned profile full of PII.
+    //
+    // Either way, this suite still cannot fully tear itself down, and that is
+    // still the correct behaviour rather than a defect.
     expect(error).not.toBeNull();
+    expect(error?.message).toMatch(/ACCOUNT_NOT_PSEUDONYMISED|not pseudonymised|Database error/i);
 
     const still = await service.from('credit_ledger').select('id').eq('user_id', userA.id);
     expect(still.data?.length).toBeGreaterThan(0);

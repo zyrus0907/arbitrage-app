@@ -1115,6 +1115,7 @@ export type Database = {
           default_budget_minor: number | null
           default_fulfilment: Database["public"]["Enums"]["fulfilment_type"]
           default_market_id: string | null
+          deleted_at: string | null
           display_name: string | null
           id: string
           inbound_shipping_per_unit_minor: number | null
@@ -1135,6 +1136,7 @@ export type Database = {
           default_budget_minor?: number | null
           default_fulfilment?: Database["public"]["Enums"]["fulfilment_type"]
           default_market_id?: string | null
+          deleted_at?: string | null
           display_name?: string | null
           id: string
           inbound_shipping_per_unit_minor?: number | null
@@ -1155,6 +1157,7 @@ export type Database = {
           default_budget_minor?: number | null
           default_fulfilment?: Database["public"]["Enums"]["fulfilment_type"]
           default_market_id?: string | null
+          deleted_at?: string | null
           display_name?: string | null
           id?: string
           inbound_shipping_per_unit_minor?: number | null
@@ -1651,6 +1654,20 @@ export type Database = {
         Returns: {
           ledger_id: string
           new_balance: number
+        }[]
+      }
+      pseudonymise_account: {
+        Args: { p_user: string }
+        Returns: {
+          already_deleted: boolean
+          credit_purchases_retained: number
+          deleted_at: string
+          events_detached: number
+          ledger_retained: number
+          lookups_deleted: number
+          purchases_deleted: number
+          unlocks_deleted: number
+          watchlist_deleted: number
         }[]
       }
       spend_credits: {

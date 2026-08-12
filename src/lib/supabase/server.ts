@@ -2,6 +2,7 @@ import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 
 import { requirePublicSupabaseEnv } from '@/lib/env';
+import { sessionCookieOptions } from '@/lib/supabase/cookies';
 import type { Database } from '@/types/database';
 
 /**
@@ -34,7 +35,9 @@ export async function createClient() {
       setAll(cookiesToSet) {
         try {
           for (const { name, value, options } of cookiesToSet) {
-            cookieStore.set(name, value, options);
+            // httpOnly is forced here, not inherited: @supabase/ssr's defaults
+            // leave the auth cookies readable by JavaScript. See cookies.ts.
+            cookieStore.set(name, value, sessionCookieOptions(options));
           }
         } catch {
           // Called from a Server Component, where the cookie jar is read-only.

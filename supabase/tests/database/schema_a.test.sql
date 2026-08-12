@@ -13,7 +13,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog, pg_temp;
 
-select plan(50);
+select plan(54);
 
 -- ---------------------------------------------------------------------------
 -- A. The tables that must exist, and the one that must not
@@ -186,13 +186,40 @@ select is(
   false,
   'a new profile defaults to not tax-registered, the conservative case (§7.4)');
 
-delete from auth.users where id = '66666666-6666-6666-6666-666666666666';
+-- RESCOPED IN T10 (ADR-0017), NOT DELETED. T03 asserted that deleting the auth
+-- user cascaded the profile away. T10 dropped `profiles_id_fkey` so that
+-- financial history under ON DELETE RESTRICT can be retained while the person
+-- is removed, and replaced the cascade with an explicit guard. The two truths
+-- that matter now are asserted instead: the delete is REFUSED while the profile
+-- still holds personal data, and it SUCCEEDS once the profile is a tombstone —
+-- which is retained rather than cascaded.
+
+select throws_ok(
+  $$delete from auth.users where id = '66666666-6666-6666-6666-666666666666'$$,
+  '23503', null,
+  'deleting an auth user whose profile is not pseudonymised is refused (T10 guard)');
+
+select lives_ok(
+  $$select public.pseudonymise_account('66666666-6666-6666-6666-666666666666')$$,
+  'pseudonymise_account tombstones the profile');
+
+select lives_ok(
+  $$delete from auth.users where id = '66666666-6666-6666-6666-666666666666'$$,
+  'and then the auth user can be deleted');
 
 select is(
   (select count(*)::int from public.profiles
     where id = '66666666-6666-6666-6666-666666666666'),
-  0,
-  'deleting the auth user cascades the profile away');
+  1,
+  'the tombstone profile is RETAINED, not cascaded — it is what the financial FKs point at (ADR-0017)');
+
+select isnt(
+  (select deleted_at from public.profiles
+    where id = '66666666-6666-6666-6666-666666666666'),
+  null,
+  'and it is marked deleted');
+
+delete from public.profiles where id = '66666666-6666-6666-6666-666666666666';
 
 -- ---------------------------------------------------------------------------
 -- E. Uniqueness (§2.3)

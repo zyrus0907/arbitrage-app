@@ -295,10 +295,12 @@ select is(
   'credit_ledger_idempotent_match secdef=f cfg=search_path=public, pg_temp acl={postgres=X/postgres}
 enforce_credit_ledger_append_only secdef=f cfg=search_path=pg_catalog, pg_temp acl={postgres=X/postgres}
 enforce_deal_lifecycle secdef=f cfg=search_path=pg_catalog, pg_temp acl={postgres=X/postgres}
+enforce_profile_tombstoned_before_auth_delete secdef=t cfg=search_path=public, pg_temp acl={postgres=X/postgres}
 enforce_webhook_event_restricted_update secdef=f cfg=search_path=pg_catalog, pg_temp acl={postgres=X/postgres}
 enforce_webhook_events_no_truncate secdef=f cfg=search_path=pg_catalog, pg_temp acl={postgres=X/postgres}
 grant_credits secdef=t cfg=search_path=public, pg_temp acl={postgres=X/postgres,service_role=X/postgres}
 handle_new_user secdef=t cfg=search_path=public, pg_temp acl={postgres=X/postgres}
+pseudonymise_account secdef=t cfg=search_path=public, pg_temp acl={postgres=X/postgres,service_role=X/postgres}
 set_updated_at secdef=f cfg=search_path=pg_catalog, pg_temp acl={postgres=X/postgres}
 spend_credits secdef=t cfg=search_path=public, pg_temp acl={postgres=X/postgres,service_role=X/postgres}',
   'the complete function inventory, security posture and ACL set is exactly as designed');
@@ -323,8 +325,15 @@ select is(
   (select string_agg(p.proname, ',' order by p.proname)
      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public' and p.prosecdef),
-  'grant_credits,handle_new_user,spend_credits',
-  'exactly three SECURITY DEFINER functions exist, and they are the known three');
+  'enforce_profile_tombstoned_before_auth_delete,grant_credits,handle_new_user,pseudonymise_account,spend_credits',
+  -- T10/ADR-0017 adds two. `pseudonymise_account` must run as owner to write the
+  -- tombstone and delete the personal rows, and is granted EXECUTE to
+  -- service_role alone — the same posture as the two credit RPCs. The delete
+  -- guard must run as owner for the same reason `handle_new_user` does: the
+  -- calling role is `supabase_auth_admin`, which holds no privilege on
+  -- `public.profiles`. It is executable by nobody, reads one column, writes
+  -- nothing, and either returns OLD or raises.
+  'exactly five SECURITY DEFINER functions exist, and they are the known five');
 
 -- pg_temp must be LAST. A definer function whose search_path resolved pg_temp
 -- first could be pointed at a temporary table created by the caller.

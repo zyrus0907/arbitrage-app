@@ -524,7 +524,12 @@ select public._t7c_admin($$
     alter table public.credit_ledger disable trigger credit_ledger_append_only;
     delete from public.credit_ledger where user_id::text like 'a7c00000%';
     alter table public.credit_ledger enable trigger credit_ledger_append_only;
+    -- T10/ADR-0017: an auth user may not be deleted while their profile still
+    -- holds personal data, so teardown takes the sanctioned path first. It is
+    -- idempotent, which is why it is safe in a cleanup block that may run twice.
+    perform public.pseudonymise_account(u.id) from auth.users u where u.id::text like 'a7c00000%';
     delete from auth.users where id::text like 'a7c00000%';
+    delete from public.profiles where id::text like 'a7c00000%';
   end
   $do$
 $$);
@@ -577,7 +582,12 @@ select public._t7c_admin($$
     alter table public.credit_ledger disable trigger credit_ledger_append_only;
     delete from public.credit_ledger where user_id::text like 'a7c00000%';
     alter table public.credit_ledger enable trigger credit_ledger_append_only;
+    -- T10/ADR-0017: an auth user may not be deleted while their profile still
+    -- holds personal data, so teardown takes the sanctioned path first. It is
+    -- idempotent, which is why it is safe in a cleanup block that may run twice.
+    perform public.pseudonymise_account(u.id) from auth.users u where u.id::text like 'a7c00000%';
     delete from auth.users where id::text like 'a7c00000%';
+    delete from public.profiles where id::text like 'a7c00000%';
   end
   $do$
 $$);

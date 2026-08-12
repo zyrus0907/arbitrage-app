@@ -27,7 +27,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog, pg_temp;
 
-select plan(158);
+select plan(161);
 
 -- ---------------------------------------------------------------------------
 -- Helpers: run a statement AS another role and report the mechanism
@@ -583,14 +583,28 @@ select is(
 
 -- The control. Without it, the four assertions above could pass because
 -- something unrelated blocks every delete.
+-- RESCOPED IN T10 (ADR-0017), NOT DELETED. The control still does its job — it
+-- proves the refusals above are the financial FKs and the T10 guard rather than
+-- some global block — but the shape changed: after T10 the guard refuses EVERY
+-- un-pseudonymised auth delete, financial rows or not, and the profile is
+-- retained as a tombstone instead of cascading.
+select throws_ok(
+  $$delete from auth.users where id = 'a1000000-0000-0000-0000-000000000003'$$,
+  '23503', null,
+  'a user with no financial rows is also refused while their profile holds personal data (T10 guard)');
+
+select lives_ok(
+  $$select public.pseudonymise_account('a1000000-0000-0000-0000-000000000003')$$,
+  'pseudonymising them is the sanctioned path, and it works');
+
 select lives_ok(
   $$delete from auth.users where id = 'a1000000-0000-0000-0000-000000000003'$$,
-  'a user with no financial rows CAN still be deleted — it is the FK doing the work, not a global block');
+  'and THEN the delete succeeds — so the refusals above are specific, not a global block');
 
 select is(
   (select count(*)::int from public.profiles where id = 'a1000000-0000-0000-0000-000000000003'),
-  0,
-  'and their profile cascaded away as AC1.5 requires');
+  1,
+  'their profile is retained as a tombstone (ADR-0017), which is what AC1.5 now means here');
 
 -- ---------------------------------------------------------------------------
 -- G. credit_purchases
@@ -967,6 +981,14 @@ select ok(
 
 -- An analytics row must not block account deletion, and must not identify a
 -- deleted user afterwards.
+-- RESCOPED IN T10 (ADR-0017), NOT DELETED. The de-identification below used to
+-- come from `app_events.user_id`'s ON DELETE SET NULL firing as the profile
+-- cascaded. The profile no longer cascades, so `pseudonymise_account` nulls the
+-- actor explicitly — and the outcome asserted next is identical.
+select lives_ok(
+  $$select public.pseudonymise_account('a1000000-0000-0000-0000-000000000004')$$,
+  'pseudonymise_account detaches the analytics actor');
+
 select lives_ok(
   $$delete from auth.users where id = 'a1000000-0000-0000-0000-000000000004'$$,
   'a user whose only footprint is an app_event can be deleted');
@@ -1197,6 +1219,10 @@ select is(
                             'enforce_webhook_events_no_truncate',
                             'spend_credits', 'grant_credits',
                             'credit_ledger_idempotent_match',
+                            -- T10/ADR-0017: account-deletion pseudonymisation
+                            -- and the guard that replaced profiles_id_fkey.
+                            'pseudonymise_account',
+                            'enforce_profile_tombstoned_before_auth_delete',
                             '_sqlstate_as', '_scalar_as')),
   0,
   'Schema C added exactly one function, the append-only trigger function');

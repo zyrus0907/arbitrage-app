@@ -43,6 +43,13 @@ jobs:
       - name: Build
         run: npm run build
 
+      # T10 — read the built output, not the source. The source scan in
+      # `tests/unit/supabase/` proves nobody wrote a server variable in a client
+      # file; only this proves what the compiler actually emitted, which is where
+      # `NEXT_PUBLIC_*` inlining and stray server imports would show up.
+      - name: Scan the client bundle for secrets
+        run: npm run scan:bundle
+
   # ---------------------------------------------------------------------------
   # T09 — the database security gate.
   #
@@ -91,7 +98,10 @@ jobs:
       - name: Database tests (pgTAP)
         run: npm run db:test
 
-      - name: Anon-key and RLS access verification
+      # T09's anon-key suite and T10's auth/session/account-deletion suite. The
+      # latter starts the real application against this stack, so it needs the
+      # seed above and must run after `db:test` (tests/integration/README.md).
+      - name: Anon-key RLS, auth, session and account-deletion suites
         run: npm run test:integration
 
       - name: Stop stack

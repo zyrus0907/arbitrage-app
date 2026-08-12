@@ -15,7 +15,7 @@ begin;
 create extension if not exists pgtap with schema extensions;
 set local search_path = extensions, public, pg_catalog, pg_temp;
 
-select plan(142);
+select plan(143);
 
 -- ---------------------------------------------------------------------------
 -- A. The five tables exist, and nothing marketplace-specific arrived with them
@@ -1217,6 +1217,16 @@ select lives_ok(
 -- R. Account deletion cascades personal rows (AC1.5)
 -- ---------------------------------------------------------------------------
 
+-- RESCOPED IN T10 (ADR-0017), NOT DELETED. These rows cascade from `profiles`,
+-- and T10 retains the profile as a tombstone, so no cascade fires any more:
+-- `pseudonymise_account` deletes them explicitly. The assertion below — that
+-- every Schema B row the user owned is gone — is unchanged and is still the
+-- thing AC1.5 requires; only the mechanism that achieves it has moved.
+
+select lives_ok(
+  $$select public.pseudonymise_account('90000000-0000-0000-0000-00000000000a')$$,
+  'pseudonymise_account removes the personal rows and tombstones the profile');
+
 delete from auth.users where id = '90000000-0000-0000-0000-00000000000a';
 
 select is(
@@ -1385,6 +1395,10 @@ select is(
                             'enforce_webhook_events_no_truncate',
                             'spend_credits', 'grant_credits',
                             'credit_ledger_idempotent_match',
+                            -- T10/ADR-0017: account-deletion pseudonymisation
+                            -- and the guard that replaced profiles_id_fkey.
+                            'pseudonymise_account',
+                            'enforce_profile_tombstoned_before_auth_delete',
                             '_deal_sql')),
   0,
   'Schema B added exactly one function, the lifecycle trigger function');
