@@ -420,12 +420,13 @@ Written as verifiable conditions. Given / When / Then where behavioural.
 
 ### F9 — Locked deal detail
 
-- **AC9.1** Shows the complete score breakdown: all five components with scores, weights, and inputs.
+- **AC9.1** Shows the complete score breakdown: all five components with their scores, weights, and the inputs behind them — **but every raw input is banded, never exact** (ADR-0018). Sales rank appears as a within-category percentile band, offer counts as a range, buybox and 90-day average only through the profit and ROI bands of AC9.3, price stability as a percentage band, and freshness as an age bucket rather than a timestamp. The user must be able to judge whether the reasoning is sound; they must not be able to fingerprint the product. Category + exact rank + exact offer count + exact buybox is a fingerprint recoverable from a third-party price-history service with no credit spent.
 - **AC9.2** Shows all named penalties and all risk flags.
 - **AC9.3** Shows the profit and ROI **bands**, the assumption set used, and the data freshness — but not the exact figures tied to an identifiable product.
 - **AC9.4** Contains no identifying information, per AC8.2, verified by the same test.
 - **AC9.5** Displays the credit cost of unlocking and the user's current balance before the user commits.
 - **AC9.6** Displays the refund policy link adjacent to the unlock button.
+- **AC9.7** Shows **how many users have already unlocked this deal** (ADR-0018). It is a competition signal the buyer genuinely needs, and it makes a leaked deal self-limiting — a deal fifty people have already bought is no longer a deal. The count is derived from `deal_unlocks` and needs no schema change; it carries no user identity.
 
 ---
 

@@ -1023,3 +1023,67 @@ The ledger's `user_id` value is immutable for the life of the row. The only rema
 - **`deals.published_by` / `retired_by` are unaffected.** They reference `auth.users` directly with `ON DELETE SET NULL` (T04), so deleting an admin still nulls the actor and keeps the timestamp.
 - **T11** should verify the cookie flags and the bundle scan independently; `npm run scan:bundle` exists for it and reads the built output rather than the source.
 - **T37** (legal pages) inherits decision 7: the privacy policy must state the retention plainly, and the duration must be settled by a human before beta.
+
+---
+
+## ADR-0018 — The locked view bands its inputs, unlock price cannot depend on post-unlock behaviour, and five product ideas are parked with triggers
+
+**Status:** Accepted · planning review taken **while T10 is still in verification** · 2026-08-17 · amends `PRODUCT_SPEC.md` AC9.1 and adds AC9.7 · amends `ARCHITECTURE.md` §6.3 on one point · binds T16, T21, T22, T29, T30, T34, T40, T41 · adds the P1 follow-up **T10A** · **changes no schema, no privilege, no policy and no completed task**
+
+> **Two scope facts, stated up front because both have already been misread once.**
+>
+> **1. T10 is not closed, and this review did not close it.** T10's implementation is merged and deployed, and ADR-0017 records the account-deletion mechanism it chose — but two of its acceptance criteria are unverified: the hosted signup → email verification → onboarding → feed → sign-out pass, and a recorded sub-60-second onboarding timing on a mid-range Android (AC2.4). **ADR-0017 is a recorded decision, not a verification.** This review ran alongside that verification and is independent of its outcome. T11 waits for both.
+>
+> **2. T10A is not retroactively part of T10.** The two follow-ups below — disposable-domain refusal and prep-cost onboarding defaults — were raised **after** T10's scope was fixed and its code shipped. They are a **separate P1 task, T10A**, depending on T10 closing and gating nothing. T10 is verified against the criteria it was built against; folding a later idea into a task already in verification would move the finish line under it and make "complete" unfalsifiable.
+
+**Context.** Three questions arrived from the founder in one session — whether a user can unlock one deal and work out the rest, whether the unlock price can scale with purchase size, and whether users could submit deals themselves. Two exposed real defects in the plan. The third is a good idea whose only problem is timing.
+
+**1. The locked view as specified is identifying, not merely persuasive.**
+
+`AC9.1` promised the locked breakdown would show all five score components "with their inputs". Read literally — and it would have been implemented literally — an unpaid caller receives: category, sales rank `14,203`, `6` FBA offers, buybox `£18.99`, 90-day average `£19.40`, and an exact price standard deviation.
+
+**That tuple is a fingerprint.** A £15/month Keepa subscription filters for it and returns the ASIN in roughly thirty seconds; the `retailer type` field then narrows the shop. No credit is spent. The product's entire revenue model rests on identity being the paid part, and the numbers were giving identity away.
+
+T21's leak test would not have caught it. That test asserts no *name*, image, external id or URL appears in the serialised locked payload — a deny-list of strings. A payload containing no names and a perfect numeric fingerprint passes it cleanly. **The test was checking the wrong category of leak.**
+
+**2. Any price that depends on what the user does after the unlock is unenforceable.**
+
+A proposal to scale unlock cost with capital deployed — a deal recommending £500 of stock costing more than one recommending £50 — was raised, drafted, and **withdrawn on the founder's objection**, which was correct and is recorded here because the same idea will otherwise return.
+
+Unlock is a **one-time reveal**. A user declares one unit, pays for one unit, and then buys fifty. There is no observation point: the purchase happens at a retailer, on the user's card, into the user's Amazon account. Nothing in the product sees it, and self-reported purchase value is worth exactly what the reporter chooses to make it worth.
+
+The same argument disposes of the transaction-fee variants explored in the same session — a 2% "search fee", an affiliate cut, a percentage of realised profit. None is collectable, and a volume-based fee additionally **inverts the incentive the product is built on**: it earns more when users buy more, whether or not they profit, which is the opposite of a tool whose credibility rests on suppressing bad deals.
+
+**Decisions.**
+
+**1. Every raw input in the locked breakdown is banded; exact values are withheld.** Sales rank as a within-category percentile band, offer counts as a range, prices only through the existing profit and ROI bands, stability as a percentage band, freshness as an age bucket rather than a timestamp. `AC9.1` is amended to say so, because the previous wording *required* the leak. The promise it was making is kept: a user can still judge whether the reasoning is sound, which is the only thing the locked view needs to do. **A band persuades; an exact number identifies.**
+
+**2. T21 owns every band in the product.** Profit bands, ROI bands and now score-input bands are one module, so the same boundaries are used by the feed, the card, the detail view and the redaction test. Bands defined in two places will disagree, and the disagreement will be the leak.
+
+**3. T21's leak test gains a numeric-fingerprint assertion.** Distinctive non-round sentinel values in rank, offer count, buybox, 90-day average and standard deviation, asserted absent from the serialised locked payload. The existing name-based assertion stays; it was necessary and not sufficient.
+
+**4. Feed filters snap to a granularity floor** — profit to units of 5, ROI to 10 points, score to bands of 10 — rejected at validation rather than silently rounded. An unbounded filter is a binary search: profit between 4.20 and 4.30 with score between 73 and 74 identifies one deal without unlocking it. This closes from the query side the hole decision 1 closes from the payload side, and it costs an honest user nothing, because nobody sources on a 10p profit distinction.
+
+**5. Unlock price is flat for the MVP, and any future variation must be deal-intrinsic.** One credit, one deal. If pricing is revisited after beta, the permissible inputs are properties known **before** the reveal — profit band, score band, data freshness. Purchase quantity, realised profit and transaction value are not permissible inputs, in any framing, because none is observable. Recorded as a constraint rather than a preference so that the rejected design is not re-derived from first principles in six months.
+
+**6. The locked card shows how many users have already unlocked the deal** (new `AC9.7`). It is a competition signal the buyer genuinely needs — and it makes a leaked deal self-limiting, because a deal fifty people have bought is no longer a deal. The count is derivable from `deal_unlocks` with no schema change.
+
+**7. Repeatability is a deal flag and a modifier, explicitly not a sixth weighted component.** A promotion that can be restocked next week is worth more than a one-off clearance pallet at the same margin; the case that prompted this product was someone re-buying **one** product for months rather than finding variety. Captured as `one_off | recurring_promo | standing_price` and a bounded modifier inside T16's existing weights config. Stated as "not a sixth component" because that is exactly what it would become on the second pass, and the five weights and their justification are load-bearing.
+
+**8. Free-credit abuse is handled by refusing disposable domains, not by adding signup friction.** Five credits multiplied by unlimited throwaway addresses is the cheapest attack the product has. If beta shows abuse, the lever is to **reduce the grant to two or three** — not to require a card at signup, which would cost more honest conversions than it saves credits, from precisely the capital-constrained beginner this product exists for.
+
+**Parked, with explicit triggers.** Recorded so they are neither lost nor started early:
+
+- **Community-submitted in-store deals.** The right diagnosis of the supply problem, and it reaches clearance stock no paid feed can see. It survives only if users share the **promotion**, never the **stock level** — a national price cut is non-rival and costs the reporter nothing, whereas "my store has twenty left" is rival and no rational user posts it. Pay two to three credits on **verification**, never on submission; the contributor unlocks their own find free. Needs photo, timestamp, contributor reputation and a "wasn't there" report. It converts the product from a curator into a platform, with the moderation duty that implies. **Trigger: 50–100 active users and a Deal Score demonstrated against outcomes.** Cold start makes it impossible earlier.
+- **Retailer data feeds.** Purchasable today — daily refresh, promotional prices, GTIN included, a few hundred a month, UK and much of Europe — and they drop in as a third `IngestionSource` without touching anything downstream. But they are scraping wrapped in an API, so a feed can die with little notice, and volume is not deals: thousands of bad matches arrive with the good ones. **Trigger: 60 manually-curated deals proving the matching and the scoring first.**
+- **Buying or prepping on the user's behalf.** Rejected. It means holding customer money, owning stock, VAT liability and Seller Central access — a regulated logistics business, not a feature. Prep centres also do not buy; they forward goods already bought, so the flow does not close.
+- **A 2% transaction or search fee.** Rejected structurally, per decision 5. **Not to be re-proposed.**
+- **Subscription pricing.** Open, not decided. Credits are one-off purchases from a population that churns within months, while monitoring is inherently recurring. Note the countervailing point before switching: credits **ration deal exposure**, which is the structural flaw that forces subscription lead lists to cap membership at a few dozen. **Trigger: real repeat-purchase data from beta.**
+
+**Consequences.**
+
+- **No migration, no privilege change, no policy change.** Every decision lands in an unbuilt task or in the new P1 follow-up T10A. T01–T09 are untouched, and T10's shipped scope is untouched.
+- **T21 is now the single owner of banding**, and its acceptance criteria change before it is written rather than after — which is the whole reason this was worth stopping for.
+- **T40 gains a falsifiable pre-launch test:** twenty published deals ranked against a paid arbitrage lead list over the same period. If a $30/month spreadsheet ranks the profitable ones higher, the Deal Score is wrong and beta waits. Better to learn that from a comparison than from a user.
+- **T10A is created, and T10 is not reopened.** The disposable-domain refusal (decision 8) and the prep-cost onboarding defaults become one P1 task, **T10A**, sequenced after T10 closes. On the prep-cost half: Amazon ended FBA prep and labelling in Europe on 1 July 2026, so most sellers now pay a third-party prep centre and most beginners do not know their real per-unit rate. A tappable list of typical rates beats an empty field, and a more accurate prep cost makes every profit figure in the product sharper than a competitor's — for the cost of one onboarding option and no integration. **Neither item is a T10 acceptance criterion, then or now**, and T10A must re-time onboarding against AC2.4 because it adds a step.
+- **T41's scope is unchanged and its framing is not.** The watchlist is "the products I re-buy — are they still worth buying today?", not a bookmark. Monitoring is what people pay for repeatedly, and it is the reason a user opens the app in week six.

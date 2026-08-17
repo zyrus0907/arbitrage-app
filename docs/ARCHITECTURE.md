@@ -2,7 +2,7 @@
 
 **Project:** Global Retail-to-Marketplace Arbitrage App
 **Document owner:** Solution Architect
-**Status:** Pre-development design. No application code written yet.
+**Status:** Active implementation. T01–T09 complete; T10 implementation deployed and in final verification.
 **Version:** 2.0 — global-first, marketplace-agnostic
 **Supersedes:** v1.0 (UK-only, Amazon-hardcoded)
 
@@ -610,6 +610,8 @@ Unchanged from v1.0 in substance. Two additions for global operation.
 **Why `marketplaces` is not public read:** it carries `adapter_key` and `capabilities`, which are integration internals, and no MVP client surface needs it — the feed is market-scoped server-side, and rendering a currency and a market name needs `currencies` and `markets` only. If a client need emerges, expose a view with the specific columns required rather than granting the table.
 
 **Why deals are not client-readable:** the paid product *is* the identity of the product. Column-level RLS to hide it is fragile and one mistake from giving it away. Server-side redaction is one function, one test, one place to get right.
+
+**Redaction withholds identifying *values*, not merely identifying *field names* (ADR-0018).** Identity leaks through numbers as readily as through names: marketplace category plus an exact sales rank, an exact offer count and an exact buybox price is a **fingerprint** — a third-party price-history subscription filters on that tuple and returns the marketplace listing in seconds, with no credit spent, and the `retailer type` field then narrows the shop. A locked payload can therefore satisfy every rule above — no title, no image, no external id, no URL — and still give away the product in full. So the locked shape carries **banded** inputs only: rank as a within-category percentile band, offer counts as a range, prices only through the profit and ROI bands, stability as a percentage band, freshness as an age bucket rather than a timestamp. **A band persuades; an exact number identifies.** The consequence for §12's payload-leak test is that a name-based deny-list is necessary and **not sufficient** — it must also assert that distinctive numeric sentinels are absent from the serialised locked payload, or a payload with no names and a perfect fingerprint passes it cleanly.
 
 ### 6.4 Roles
 

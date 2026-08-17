@@ -2,9 +2,9 @@
 
 **Project:** Global Retail-to-Marketplace Arbitrage App
 **Document owner:** Technical Project Manager
-**Version:** 2.3 — global-first, marketplace-agnostic, Amazon-first MVP
+**Version:** 2.5 — global-first, marketplace-agnostic, Amazon-first MVP
 **Source documents:** `ARCHITECTURE.md` v2.0 (technical contract) · `PRODUCT_SPEC.md` v2.0 (scope contract)
-**Status:** In execution. **T01–T05A complete.** Next task: T06.
+**Status:** In execution. **T01–T09 complete. T10 is implemented and deployed but NOT closed** — two acceptance criteria remain unverified (see T10). **T11 does not start until both pass.** ADR-0017 records how T10 solved account deletion; it is not evidence that T10's acceptance criteria were verified.
 
 > **Execution scope:** Build a global-first core, but operate exactly one launch market during MVP. Amazon is the only marketplace integration in MVP. Country, currency, tax regime and marketplace must be data/configuration concepts, not hard-coded application assumptions.
 
@@ -45,6 +45,24 @@ A **product decision** taken during T04, when the schema work surfaced that `ARC
 - Propagated into T19 (drafts only, never publishes, auto-retires on suppression, skips rejected matches), T22 and T29 (feed predicate is exactly `status = 'active'`), T24 (a confirmed bad match marks `product_matches` rejected), T27 (the pipeline test proves zero active deals without an admin publish) and T33 (publish/retire call T20A).
 - Added AC3.7–AC3.10 and AC15.6 to `PRODUCT_SPEC.md`.
 
+## Changelog: v2.4 → v2.5
+
+Product-review pass, recorded as **ADR-0018**. **No priority changes to any existing task. No schema, privilege or policy changes. T01–T09 are untouched, and T10's shipped scope is untouched.** Every item lands inside a task that has not yet been built, or in the new P1 follow-up **T10A**.
+
+**The review ran while T10 was still in verification.** T10's implementation is deployed; two of its acceptance criteria are not yet verified. Nothing in this pass closes T10, and nothing in this pass is a T10 acceptance criterion.
+
+- **The locked view bands its raw inputs; exact values are withheld.** As previously specified, `AC9.1` *required* a leak: category + exact rank + exact offer count + exact buybox is a fingerprint recoverable from Keepa in seconds, with no credit spent. `AC9.1` amended; T21 gains the banding rules and a **numeric-fingerprint test** — its existing name-based deny-list would have passed a fully identifying payload.
+- **T22 gains a filter granularity floor** (profit to units of 5, ROI to 10 points, score to bands of 10), closing the same hole from the query side.
+- **Unlock count shown on locked deals** (new `AC9.7`) — a real competition signal, and it makes a leaked deal self-limiting.
+- **Unlock pricing settled: flat 1 credit.** Variable pricing by capital deployed was proposed and rejected as unenforceable — unlock is a one-time reveal and post-unlock behaviour is invisible. Recorded as a constraint so the design is not re-derived later.
+- **Repeatability** added to T16 as a bounded modifier, explicitly **not** a sixth weighted component.
+- **Added T10A — signup abuse refusal and prep-cost onboarding defaults.** A **separate P1 task**, sequenced after T10 closes, **not** a widening of T10 and **not** retroactively part of T10's scope: disposable-domain refusal on the signup grant, and prep-cost defaults in onboarding (Amazon ended European FBA prep on 1 July 2026 and most beginners do not know their real per-unit rate). T10 is verified against the criteria it shipped against; T10A is judged on its own.
+- **T40 gains a competitor benchmark**, making the Deal Score falsifiable before launch.
+- **T41 reframed** as monitoring rather than bookmarking. Same scope.
+- **Five product ideas parked with explicit triggers** in the appendix, including community-sourced in-store deals and retailer data feeds.
+
+---
+
 ## Changelog: v2.3 → v2.4
 
 T08 execution decisions, recorded as **ADR-0015**. **No product scope changed. No priority changed. No task was removed. No migration was added.** T01–T07 outcomes are untouched.
@@ -71,7 +89,7 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
 
 ## 0. How to use this document
 
-46 tasks: **T01–T40 (including T05A and T20A) are P0** (beta cannot start without them), **T41–T44 are P1** (ship during beta only if the P0 loop is stable). P2 items from `PRODUCT_SPEC.md` §5.3 appear nowhere in this plan by design.
+47 tasks: **T01–T40 (including T05A and T20A) are P0** (beta cannot start without them), **T10A and T41–T44 are P1** (ship during beta only if the P0 loop is stable). P2 items from `PRODUCT_SPEC.md` §5.3 appear nowhere in this plan by design.
 
 **Rules of engagement for every task:**
 
@@ -90,7 +108,7 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
 
 ---
 
-# PHASE 1 — FOUNDATION (T01–T11, including T05A)
+# PHASE 1 — FOUNDATION (T01–T11, including T05A; plus the P1 follow-up T10A)
 
 ---
 
@@ -462,7 +480,7 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
   - **Demonstrate a synthetic second market can be seeded without a migration or business-logic code change.**
 - **Testing requirements:** Run seed twice; counts remain stable. Resolve both the live launch market and the synthetic second market through the future `MarketContext` shape using fixtures. Verify fee-band coverage in the launch market has no gaps/overlaps.
 - **Priority:** P0
-- **Completion note:** Eight numbered files in `supabase/seed/`, loaded in dependency order by the existing `./seed/*.sql` glob — **no `config.toml` change, no migration, no DDL, no grant, no policy, and no row outside the nine reference tables**. 31 rows: 5 currencies · 4 countries · 4 marketplaces · 2 markets · 4 tax schedules · 3 fee schedules · 5 retailers · 3 credit packs · 6 pack prices. The launch market is `gb-amazon-uk` (GB + `amazon_uk`, GBP) at `active = true AND launch_status = 'live'` — **exactly one live market**, asserted rather than constrained, since `launch_status` is a lever T33 legitimately flips. **Fee and tax data are from primary sources, not memory:** the UK schedules were read from Amazon's own *Rate Card — Europe Fees, effective 1 July 2026* PDF and from `gov.uk/vat-rates`. A superseded 1 February 2026 rate card was found and discarded mid-task — seeding it as current would have been precisely the risk #2 defect. The current UK fee schedule carries **52 referral categories** ending in Amazon's own `everything_else` catch-all (so category coverage is total by construction), **42 fulfilment bands across all 13 UK size tiers**, and storage in **cubic feet** where DE is cubic metres. Referral rules store `mode` explicitly as `flat | threshold | marginal`, because on a £60 item under "15% up to £45, then 9%" the marginal reading gives £8.10 and the threshold reading £5.40. **GB has three real tax versions, not invented fixtures** — 17.5% → 20% on 2011-01-04, then a third version on 2024-08-01 where the rate is unchanged but `marketplace_fees_taxed` becomes true, because Amazon moved UK seller billing to a UK-established entity and referral/FBA fees became VAT-bearing; seeding `false` would have understated every launch-market fee by 20% of the fee for the non-registered seller who is our default. **`amazon_uk` has two adjacent fee versions** split at 2026-04-17 when the 1.5% fuel surcharge began, built from one shared CTE so the two cannot drift by a typo. **Every `stripe_price_id` is NULL** (ADR-0010) — asserted both as `count = 0` and as a regex, so a plausible fake such as `price_TODO` fails too — and `0008_credit_packs.sql` deliberately excludes that column from its `ON CONFLICT DO UPDATE`, verified by simulating a T34 backfill and re-running the seed without losing it. **Seeds are idempotent and deterministic:** re-running all eight files against a seeded database changes nothing, and two full `db:reset` runs from zero produce an identical md5 fingerprint over every seeded column including generated ids and jsonb payloads. **No fixture users, deals, purchases or ledger entries** — asserted, because a dashboard populated with invented deals misleads the person deciding whether the pipeline works. `docs/MARKET_PLAYBOOK.md` delivered with the full gate list. The synthetic second market (`de-amazon-de`, planned, inactive, with its own tax and fee schedules) was added with no DDL, no new column and no code change, which is the global-first proof. **T06 surface verified against the real seed:** `anon` sees 1 country, 5 currencies, 1 market, 3 credit packs and **0 pack prices**, is refused `marketplaces`/`tax_schedules`/`fee_schedules`/`retailers` with a **privilege error `42501`** rather than an empty set, and cannot see the planned market; `service_role` sees all 6 pack prices and both markets. **New suite:** `supabase/tests/database/seed_reference_data.test.sql`, **103 assertions**, asserting rates, exponents, flags and boundary dates **by value** rather than by row count. Suite green: **887 pgTAP assertions** across 9 files, **106 application tests**, typecheck, lint and build clean. The dev dashboard was confirmed to reflect the seed with **no UI change** (Markets 2, Retailers 5, Credit packs 3, five currencies at exponents 2/2/0/3/2) by running the dev server against the local stack via environment overrides; `.env.local`, which points at the hosted project, was not edited.
+- **Completion note:** Eight numbered files in `supabase/seed/`, loaded in dependency order by the existing `./seed/*.sql` glob — **no `config.toml` change, no migration, no DDL, no grant, no policy, and no row outside the nine reference tables**. 36 rows: 5 currencies · 4 countries · 4 marketplaces · 2 markets · 4 tax schedules · 3 fee schedules · 5 retailers · 3 credit packs · 6 pack prices. (Total corrected from "31" during T10: the nine per-table figures were always right and are unchanged; only their sum was mis-stated. Recounted from the seed files against a clean `db:reset`, and confirmed again on the hosted development project when the seed was applied there.) The launch market is `gb-amazon-uk` (GB + `amazon_uk`, GBP) at `active = true AND launch_status = 'live'` — **exactly one live market**, asserted rather than constrained, since `launch_status` is a lever T33 legitimately flips. **Fee and tax data are from primary sources, not memory:** the UK schedules were read from Amazon's own *Rate Card — Europe Fees, effective 1 July 2026* PDF and from `gov.uk/vat-rates`. A superseded 1 February 2026 rate card was found and discarded mid-task — seeding it as current would have been precisely the risk #2 defect. The current UK fee schedule carries **52 referral categories** ending in Amazon's own `everything_else` catch-all (so category coverage is total by construction), **42 fulfilment bands across all 13 UK size tiers**, and storage in **cubic feet** where DE is cubic metres. Referral rules store `mode` explicitly as `flat | threshold | marginal`, because on a £60 item under "15% up to £45, then 9%" the marginal reading gives £8.10 and the threshold reading £5.40. **GB has three real tax versions, not invented fixtures** — 17.5% → 20% on 2011-01-04, then a third version on 2024-08-01 where the rate is unchanged but `marketplace_fees_taxed` becomes true, because Amazon moved UK seller billing to a UK-established entity and referral/FBA fees became VAT-bearing; seeding `false` would have understated every launch-market fee by 20% of the fee for the non-registered seller who is our default. **`amazon_uk` has two adjacent fee versions** split at 2026-04-17 when the 1.5% fuel surcharge began, built from one shared CTE so the two cannot drift by a typo. **Every `stripe_price_id` is NULL** (ADR-0010) — asserted both as `count = 0` and as a regex, so a plausible fake such as `price_TODO` fails too — and `0008_credit_packs.sql` deliberately excludes that column from its `ON CONFLICT DO UPDATE`, verified by simulating a T34 backfill and re-running the seed without losing it. **Seeds are idempotent and deterministic:** re-running all eight files against a seeded database changes nothing, and two full `db:reset` runs from zero produce an identical md5 fingerprint over every seeded column including generated ids and jsonb payloads. **No fixture users, deals, purchases or ledger entries** — asserted, because a dashboard populated with invented deals misleads the person deciding whether the pipeline works. `docs/MARKET_PLAYBOOK.md` delivered with the full gate list. The synthetic second market (`de-amazon-de`, planned, inactive, with its own tax and fee schedules) was added with no DDL, no new column and no code change, which is the global-first proof. **T06 surface verified against the real seed:** `anon` sees 1 country, 5 currencies, 1 market, 3 credit packs and **0 pack prices**, is refused `marketplaces`/`tax_schedules`/`fee_schedules`/`retailers` with a **privilege error `42501`** rather than an empty set, and cannot see the planned market; `service_role` sees all 6 pack prices and both markets. **New suite:** `supabase/tests/database/seed_reference_data.test.sql`, **103 assertions**, asserting rates, exponents, flags and boundary dates **by value** rather than by row count. Suite green: **887 pgTAP assertions** across 9 files, **106 application tests**, typecheck, lint and build clean. The dev dashboard was confirmed to reflect the seed with **no UI change** (Markets 2, Retailers 5, Credit packs 3, five currencies at exponents 2/2/0/3/2) by running the dev server against the local stack via environment overrides; `.env.local`, which points at the hosted project, was not edited.
 - **Remote data: deliberately NOT applied.** T08 seed data is the deterministic baseline for **local and ephemeral CI databases only**. The hosted development project was **not** seeded, and no remote mutation of any kind was performed. This is a decision, not an omission: T08's acceptance criteria concern the seed's existence, correctness and idempotency, and T09 runs against an ephemeral database in CI. It is also the tool's default rather than a convention anyone must remember — **`npm run db:push` carries migrations only**; seeding a remote requires an explicit `--include-seed`. If the hosted project is ever seeded, it is a separate, approved operation that must not touch migration history.
 - **Decisions recorded:** ADR-0015, covering the five things T08 had to decide that no existing document settles: that the launch market is GB / `amazon_uk` / GBP and is now written down rather than inferred from examples; that the schema stays global-first despite a one-market seed, proved by a second market added with no DDL; that `surcharges.basis` is widened to `referral_fee | fulfilment_fee | selling_fees | sell_price | flat` with an optional `applies_to_categories`; that T14 must implement every basis and throw on an unknown one; and that pack prices are provisional planning values whose `stripe_price_id` stays NULL until T34.
 - **Left to T14 / T15 (pricing engine):** **all five surcharge bases must be implemented, and an unrecognised basis must throw.** `ARCHITECTURE.md` §2.2 previously listed only `referral_fee | sell_price | flat`, which cannot express two of the launch market's three real surcharges — the Digital Services Fee applies to selling **and** fulfilment fees, the fuel surcharge to fulfilment fees alone. §2.2 is amended (ADR-0015 decision 3). A `default:` branch that skips or coerces an unknown basis reintroduces a silent, market-wide **understatement of cost**, which **overstates profit** — risk #5, in the one direction this product cannot afford. The seeded UK schedule is the day-one fixture: it contains a `selling_fees` and a `fulfilment_fee` entry, so an implementation that ignores either produces a visibly wrong figure against T15's hand-worked examples. The same obligation covers `min_fee_minor` and the `flat`/`threshold`/`marginal` referral mode, which is stored explicitly on every rule and must never be inferred.
@@ -508,7 +526,17 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
 
 ---
 
-## T10 — Authentication, session middleware and onboarding profile
+## ⏳ T10 — Authentication, session middleware and onboarding profile
+
+> **Status: IMPLEMENTED AND DEPLOYED — NOT CLOSED.** The code is written, merged and deployed, and ADR-0017 records the account-deletion mechanism it chose. **Two acceptance criteria below have not been verified**, and until both are, this task is open.
+>
+> **Outstanding verification — both required, neither optional:**
+> 1. **The hosted end-to-end flow, on the hosted project, in one unbroken pass:** signup → email verification (a real verification email, `enable_confirmations = true`, not the local Mailpit path) → onboarding → feed → sign-out. The local stack runs with confirmations off (`RUNBOOK.md` §11.1), so a green local run does not evidence this.
+> 2. **Onboarding completed in under 60 seconds on a mid-range Android device (AC2.4), with the timing recorded** in the PR or the completion note. A desktop or simulator timing does not substitute — the criterion names the device class because that is the constraint.
+>
+> **ADR-0017 is not evidence of completion.** It answers one design question T10 had to settle (how deletion works given `ON DELETE RESTRICT`); it says nothing about whether the flow above was walked or the timing taken. A recorded decision and a verified acceptance criterion are different artefacts, and one has repeatedly been read as the other.
+>
+> **T11 does not start until both pass.** T11 depends on T09 and T10, and a security review of an authentication flow nobody has walked end to end on the hosted project reviews the source rather than the system.
 
 - **Goal:** A user can sign up, verify, sign in, complete onboarding, and be correctly blocked from app routes when logged out (F1, F2).
 - **Agent:** Backend Engineer
@@ -533,11 +561,29 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
 
 ---
 
+## T10A — Signup abuse refusal and prep-cost onboarding defaults
+
+- **Goal:** Two small additions to the T10 surface, raised in the ADR-0018 product review **after** T10 shipped. **This is a separate task, not a widening of T10.** T10 is verified and closed against the criteria it was built against; nothing here is retroactively a T10 acceptance criterion, and T10 must not be reopened to absorb it.
+- **Agent:** Backend Engineer
+- **Dependencies:** **T10 closed** (both outstanding verifications passed). Does **not** block T11 — a P1 follow-up cannot gate a P0 security review.
+- **Files / areas:** `src/app/(auth)/*`, `src/lib/validation/profile.ts`, `src/services/profile/`, onboarding steps under `src/app/(app)/`
+- **Acceptance criteria:**
+  - **Disposable-email-domain refusal at signup.** Five credits × unlimited throwaway addresses is the cheapest attack this product has (AC10.6 grants on every signup). Signup is refused for a known disposable domain, with a clear message, **before** `grant_credits` is called — the grant must not be issued and then clawed back, because the ledger is append-only and a clawback is a `chargeback` row that means something else entirely (ADR-0010).
+  - The domain list is **data, not a hardcoded array in a route handler**, and refusing a domain is a configuration change rather than a deploy.
+  - **Do not add card-on-file at signup.** It would cost more honest conversions than it saves credits, from exactly the capital-constrained beginner this product exists for (ADR-0018 decision 8). If beta shows real abuse, the lever is to **reduce the grant to two or three credits**, not to add friction.
+  - **Prep-cost defaults in onboarding.** Amazon ended FBA prep and labelling services in Europe on 1 July 2026, so most sellers now pay a third-party prep centre and most beginners do not know their per-unit rate. The prep-cost step offers a short list of typical prep-centre rates as tappable defaults instead of an empty number field. The user can still type their own figure, and the stored value remains integer minor units with an explicit currency.
+  - **No integration, no partnership, no API.** The rates are seeded reference values with a recorded source and a verification date, in the same spirit as the T08 fee schedules — not scraped, and not invented.
+  - The added onboarding option must not push onboarding past the AC2.4 60-second budget; re-time it on the same mid-range Android device and record the figure.
+- **Testing requirements:** A test that a disposable domain is refused and **no ledger row is written**; a test that an ordinary domain still receives exactly one `signup_grant` row. A test that selecting a default prep rate stores the correct minor-unit value in the market currency. Re-run the AC2.4 timing and record it.
+- **Priority:** **P1** — ship during beta only if the P0 loop is stable.
+
+---
+
 ## T11 — Security review #1: authentication, RLS and secrets
 
 - **Goal:** Independent verification that the foundation is sound before any money logic is built on it.
 - **Agent:** Code Reviewer / Security Reviewer
-- **Dependencies:** T09, T10
+- **Dependencies:** T09, **T10 closed** — both of T10's outstanding verifications (hosted signup → verification → onboarding → feed → sign-out, and the recorded sub-60-second onboarding timing on a mid-range Android) must have passed. **T11 does not start on a T10 that is merely deployed.** T10A is a P1 follow-up and is **not** a dependency.
 - **Files / areas:** Review only. Findings land in `docs/DECISIONS.md` and new issues.
 - **Acceptance criteria:**
   - Confirms: no service-role key or third-party secret is reachable from the client bundle (inspect the built bundle, do not take it on trust).
@@ -648,6 +694,7 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
   - Demand/rank is normalised **within marketplace and category** before scoring (AC7.4).
   - Penalties applied multiplicatively and capped, per §8.3: marketplace operator on listing/in stock, match confidence < 0.8, stale/thin data, gating-risk brand, profit below floor.
   - Hard suppressions return "do not publish": net profit ≤ 0, match confidence < 0.6, required inputs missing (AC7.5).
+  - **Repeatability signal (ADR-0018).** A promotion that can be restocked next week is worth more than a one-off clearance pallet at the same margin — the case that prompted this product was someone re-buying **one** product for months rather than finding variety. Capture as a deal flag (`one_off | recurring_promo | standing_price`) and a **bounded modifier inside the existing weights config**. **Explicitly not a sixth weighted component:** the five weights and their justification are load-bearing, and a sixth is exactly what this becomes on the second pass if it is not ruled out in writing now.
   - Persisted breakdown matches the §8.4 shape: every component's score, weight and **raw inputs**, plus every applied penalty with its code and factor (AC7.2, AC7.3).
   - **All weights, penalty factors and market-specific thresholds live in controlled configuration.** No magic constant appears elsewhere in scoring code (AC7.7).
   - Returns `scoreVersion: 'score.v1'`.
@@ -780,11 +827,14 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
 - **Acceptance criteria:**
   - `redactDeal(deal, { unlocked })` returns a locked or full shape. It is the **only** function producing a client-facing deal object; no route serialises a deal directly.
   - A locked deal's returned object contains **no** product title, image, marketplace external ID, retailer name, retailer URL, GTIN, brand or `retailer_product_id` — the fields are **absent from the object**, not nulled, not hidden client-side (AC8.2, AC9.4).
-  - A locked deal **does** contain: Deal Score, full score breakdown with component inputs, named penalties, risk flags, profit band, ROI band, marketplace category, retailer *type*, assumption set, data freshness (AC9.1–AC9.3).
+  - A locked deal **does** contain: Deal Score, full score breakdown, named penalties, risk flags, profit band, ROI band, marketplace category, retailer *type*, assumption set, data freshness, and the unlock count (AC9.1–AC9.3, AC9.7).
+  - **Every raw input in the breakdown is banded; exact values are withheld (ADR-0018).** Sales rank → within-category percentile band. Offer counts → a range. Buybox and 90-day average → the profit and ROI bands only, never the price itself. Price stability → a percentage band. Freshness → an age bucket, not a timestamp.
+  - **Reason this is not optional.** Category + exact rank + exact offer count + exact buybox is a *fingerprint*: a £15/month Keepa subscription filters for that tuple and returns the external ID in about thirty seconds, and the `retailer type` field then narrows the shop — with no credit spent. Withholding the name does not protect the paid product if the numbers identify it. **A band persuades; an exact number identifies.**
   - The automated test asserts against the **serialised JSON string**, using a deny-list of substrings drawn from the fixture deal, and fails if any appears.
   - The test is a **CI blocker**.
-  - Banding functions for profit and ROI are defined here so the same bands are used everywhere.
+  - **This module owns every band in the product** — profit, ROI and score inputs — so the feed, the card, the detail view and this test use identical boundaries. Bands defined in two places will disagree, and the disagreement is the leak.
 - **Testing requirements:** Property-style test: for a fixture deal with distinctive sentinel values in every identity field, assert none of those sentinels appears anywhere in `JSON.stringify(redactDeal(deal, { unlocked: false }))`. Add a deliberately failing variant in review to prove the test actually catches a leak.
+  - **Numeric fingerprint assertion (ADR-0018).** Distinctive non-round sentinel *numbers* in sales rank, offer count, buybox, 90-day average and price standard deviation, asserted absent from the serialised locked payload. The name-based deny-list is necessary and **not sufficient**: a payload containing no names and a perfect numeric fingerprint passes it cleanly. Both assertions are CI blockers.
 - **Priority:** P0
 
 ---
@@ -801,6 +851,7 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
   - **Every user-facing deal query filters on exactly `status = 'active'`** (AC3.7). Not `<> 'retired'`, not "published-ish" — a draft is a candidate the admin has not approved, and one loose predicate puts unreviewed deals in front of paying users. A single query builder owns this predicate so it cannot be forgotten per route.
   - `GET /deals/:id` returns a non-active deal **only** to a user who already unlocked it (AC3.6, AC10.7), and then with a `retired` flag. A draft is never returned to any user, unlocked or not.
   - Feed filters applied **server-side and market-scoped**: minimum profit, minimum ROI, minimum score, category, budget ceiling (AC8.3).
+  - **Filter granularity floor (ADR-0018).** Minimum profit snaps to whole units of 5 in the market currency, minimum ROI to 10 percentage points, minimum score to bands of 10. Values outside the floor are **rejected at validation, not silently rounded**. An unbounded filter is a binary search: profit between 4.20 and 4.30 with score between 73 and 74 identifies a single deal without unlocking it. This closes from the query side what T21's banding closes from the payload side, and it costs an honest user nothing — nobody sources on a 10p profit distinction.
   - Default sort is Deal Score descending; deals scoring under 50 are excluded from the default feed (AC8.4).
   - Cursor pagination. No offset pagination.
   - Every returned row passes through `redactDeal`. Unlock state is resolved server-side from `deal_unlocks`.
@@ -943,7 +994,7 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
 - **Acceptance criteria:**
   - Server-rendered feed reading the redacted, active-market-scoped API. **No client-side data-fetching library.**
   - The feed shows **exactly `status = 'active'` deals** (AC3.7). Drafts are admin-only and belong in T33's review queue; retired deals are reachable only by a user who unlocked them (AC3.6). The UI never widens the predicate the API applies.
-  - `DealCard` shows: Deal Score, profit band, ROI band, marketplace category, retailer *type*, data freshness (AC8.1).
+  - `DealCard` shows: Deal Score, profit band, ROI band, marketplace category, retailer *type*, data freshness, and **how many users have already unlocked it** (AC8.1, AC9.7) — a competition signal the buyer genuinely needs, and one that makes a leaked deal self-limiting: a deal fifty people have bought is no longer a deal.
   - `DealCard` shows **no** product name, image, marketplace external ID or retailer name — and the component has no props that could carry them.
   - Filters: minimum profit, minimum ROI, minimum score, category, budget ceiling; applied server-side via URL search params so state is shareable and back-button-correct (AC8.3).
   - Data older than 48 hours is **visually marked stale** (AC5.3). Stale data must look stale, not merely be labelled somewhere.
@@ -961,7 +1012,7 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
 - **Dependencies:** T23, T29
 - **Files / areas:** `src/app/(app)/deal/[id]/page.tsx`, `src/components/deals/{DealDetail,ScoreBreakdown,RiskFlags,UnlockButton,ProfitBreakdown}.tsx`
 - **Acceptance criteria:**
-  - **Locked state** shows the complete score breakdown — all five components with scores, weights and raw inputs (AC9.1) — every named penalty and risk flag in plain English (AC9.2, AC7.3), profit and ROI bands, the assumption set, and data freshness (AC9.3). It withholds only identity.
+  - **Locked state** shows the complete score breakdown — all five components with scores, weights and **banded** inputs, never exact figures (AC9.1, ADR-0018) — every named penalty and risk flag in plain English (AC9.2, AC7.3), profit and ROI bands, the assumption set, and data freshness (AC9.3). It withholds only identity.
   - Locked state shows the credit cost and the user's current balance **before** committing (AC9.5), and the refund policy link adjacent to the unlock button (AC9.6).
   - Unlock sends an `Idempotency-Key`, disables on submit, and handles `INSUFFICIENT_CREDITS` with a route to buy credits (or, pre-Stripe, a clear "contact the founder" path).
   - **Unlocked state** shows product title, image, brand, exact retailer name and pack size (AC11.1); one-tap links to the retailer page and the marketplace listing (Amazon in MVP), both opening in a new tab (AC11.2).
@@ -1045,6 +1096,7 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
 ## T34 — Stripe Checkout and credit packs
 
 - **Goal:** `POST /billing/checkout` and the credits purchase screen (F17, first half).
+- **Pricing is settled for the MVP: flat 1 credit per unlock (ADR-0018).** Variable pricing by capital deployed was proposed and **rejected**: unlock is a one-time reveal, so a user declares one unit, pays for one unit, and buys fifty — invisibly and unstoppably, because the purchase happens at a retailer on their own card. The same argument disposes of a 2% search fee, an affiliate cut and a share of realised profit; a volume-based fee additionally **inverts the incentive the product rests on**, earning more when users buy more whether or not they profit. If pricing is revisited after beta, permissible inputs are **deal-intrinsic and known before the reveal** (profit band, score band, freshness); purchase quantity, transaction value and realised profit are not, in any framing.
 - **Agent:** Integration Engineer
 - **Dependencies:** T23, T28
 - **Files / areas:** `src/services/billing/{checkout.ts,packs.ts}`, `src/app/api/v1/billing/checkout/route.ts`, `src/app/(app)/credits/*`
@@ -1175,6 +1227,7 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
   - **Gate A** signed off item by item: 15+ pricing cases pass · launch-market tax-regime cases verified **by someone other than the author** · redaction leak test green and blocking CI · concurrency test green · ledger append-only verified at database level · scoring determinism verified · RLS default-deny verified · no secret in the client bundle · rate limits live · security headers set.
   - **Data readiness:** 60+ published deals in the chosen launch market across ≥3 retailers and ≥4 marketplace categories (AC3.5); **100% manually spot-verified** for correct marketplace listing, correct pack size, live retailer link and live price; launch-market fee and tax schedules verified against current sources with the verification date recorded.
   - **Market readiness:** exactly one MVP market is live; its currency/tax/fee/provider/Stripe/retailer-supply checks are complete; a synthetic second market has been seeded/resolved without business-logic changes.
+  - **Competitor benchmark (ADR-0018):** rank 20 of the app's published deals against a paid arbitrage lead list covering the same period. The app's Deal Score must place the genuinely profitable ones higher. **If a $30/month spreadsheet ranks better, the Deal Score is wrong and beta waits** — better to learn that from a comparison than from a user.
   - **The reality check:** the founder has personally bought **at least 5 deals from the app with their own money** and the actual outcomes are recorded. *Do not put this product in front of a user until you have taken your own advice and it worked.*
   - **Gate B** signed off: legal pages live · disclaimers present on every profit screen · Sentry live · admin console operational · runbook written · feed under 2s on device · full flow completed by someone other than the founder · support channel live with a stated response commitment · **15 deals/week curation capacity confirmed and calendared** · Stripe verified in test mode.
   - Every unchecked item is either completed or explicitly waived in writing with a named reason. **No silent waivers.**
@@ -1191,7 +1244,7 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
 
 ## T41 — Watchlist (API and UI)
 
-- **Goal:** F18. Save, list, remove an unlocked deal.
+- **Goal:** F18. Save, list, remove an unlocked deal — framed as **"the products I re-buy: are they still worth buying today?"** rather than as a bookmark (ADR-0018). Monitoring is what people pay for repeatedly, and it is the reason a user opens the app in week six. Same scope, sharper purpose.
 - **Agent:** Backend Engineer, then Frontend Engineer
 - **Dependencies:** T30
 - **Files / areas:** `src/app/api/v1/watchlist/route.ts`, `src/services/watchlist/`, `src/app/(app)/watchlist/page.tsx`
@@ -1261,9 +1314,9 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
 
 # NEXT 5 TASKS TO EXECUTE
 
-**Completed:** T01 (repo, CI, deploy) · T02 (Supabase, clients, migrations) · T03 (11 core tables, 9 enums, RLS enabled, privileges normalised — ADR-004) · T04 (deals, user activity, cross-market consistency by composite FK — ADR-0008; deal lifecycle `draft | active | retired` — ADR-0009) · T05 (credit ledger, per-currency pack pricing, operational logs — ADR-0011) · T05A (temporal exclusion constraints on both schedule tables — ADR-0012) · T06 (19 RLS policies paired with 16 grants, 13 tables explicitly left closed, restricted-UPDATE protection on `stripe_webhook_events` — ADR-0013) · T07 (atomic `spend_credits` / `grant_credits`, `service_role`-only, idempotent on the ledger key, AC10.1 proved by a real `dblink` concurrency gate — ADR-0014) · T08 (31 reference rows across 8 idempotent, deterministic seed files; GB / `amazon_uk` / GBP as the one live market; UK tax and fee schedules from primary sources; `stripe_price_id` NULL throughout; `MARKET_PLAYBOOK.md`; **local/ephemeral only — the hosted project was deliberately not seeded** — ADR-0015) · T09 (anon-key RLS suite + exhaustive privilege allowlists; **the database tests were missing from CI and now block merges**; `stripe_webhook_events` TRUNCATE guard — ADR-0016).
+**Completed:** T01 (repo, CI, deploy) · T02 (Supabase, clients, migrations) · T03 (11 core tables, 9 enums, RLS enabled, privileges normalised — ADR-004) · T04 (deals, user activity, cross-market consistency by composite FK — ADR-0008; deal lifecycle `draft | active | retired` — ADR-0009) · T05 (credit ledger, per-currency pack pricing, operational logs — ADR-0011) · T05A (temporal exclusion constraints on both schedule tables — ADR-0012) · T06 (19 RLS policies paired with 16 grants, 13 tables explicitly left closed, restricted-UPDATE protection on `stripe_webhook_events` — ADR-0013) · T07 (atomic `spend_credits` / `grant_credits`, `service_role`-only, idempotent on the ledger key, AC10.1 proved by a real `dblink` concurrency gate — ADR-0014) · T08 (36 reference rows across 8 idempotent, deterministic seed files; GB / `amazon_uk` / GBP as the one live market; UK tax and fee schedules from primary sources; `stripe_price_id` NULL throughout; `MARKET_PLAYBOOK.md`; **local/ephemeral only — the hosted project was deliberately not seeded** — ADR-0015) · T09 (anon-key RLS suite + exhaustive privilege allowlists; **the database tests were missing from CI and now block merges**; `stripe_webhook_events` TRUNCATE guard — ADR-0016).
 
-**Next task: T10.** Give these to coding agents in this exact order. Do not start one until the previous task's acceptance criteria are verified.
+**Current task: T10 — implemented and deployed, in verification, NOT closed.** Two acceptance criteria remain: the hosted signup → verification → onboarding → feed → sign-out pass, and a recorded sub-60-second onboarding timing on a mid-range Android (AC2.4). **T11 does not start until both pass.** Give tasks to coding agents in this exact order. Do not start one until the previous task's acceptance criteria are verified — ADR-0017 is a recorded decision, not a verification.
 
 ### 1. ✅ T05 — Credits, per-currency billing and operational logs — COMPLETE
 **Agent:** Database Engineer · **Depends on:** T03  
@@ -1290,7 +1343,7 @@ Race-free, idempotent, `SECURITY DEFINER`, with `EXECUTE` revoked from `PUBLIC`/
 Currencies, countries, Amazon locales, exactly one live market with verified tax and fee schedules, retailers, credit packs and per-currency pack prices — with `stripe_price_id` seeded `NULL` and no placeholders (ADR-0010). Plus `docs/MARKET_PLAYBOOK.md` and the synthetic-second-market proof. The launch market is GB / `amazon_uk` / GBP, named for the first time in ADR-0015; `surcharges.basis` widened there too, and **T14 owns implementing all five bases.** **Seed data is local/ephemeral only — the hosted development project was deliberately not seeded.**  
 *Why fifth:* it is the first task that proves the global-first claim, and it cannot run before T05A without risking committing the exact overlap the constraint exists to prevent.
 
-**Next up:** ✅ T09 (RLS/privilege QA) — **COMPLETE, PASS WITH FINDINGS**, two P1s fixed (database tests absent from CI; `stripe_webhook_events` TRUNCATE guard) → **T10 (auth/onboarding, and it now owns a demonstrated blocker: a user holding financial records cannot be deleted, so the pseudonymisation ADR-0010 leaves open has a failing-path test waiting for it)** → T11 (security review).  
+**Next up:** ✅ T09 (RLS/privilege QA) — **COMPLETE, PASS WITH FINDINGS**, two P1s fixed (database tests absent from CI; `stripe_webhook_events` TRUNCATE guard) → **T10 (auth/onboarding — implemented and deployed, account deletion resolved by ADR-0017, but IN VERIFICATION and not closed: hosted E2E and the AC2.4 Android timing are both outstanding)** → T11 (security review, gated on T10 closing). T10A is a P1 follow-up after T10 closes and gates nothing.  
 Do not begin the deal engine until T11 has no open P0 findings.
 ---
 
@@ -1299,6 +1352,7 @@ Do not begin the deal engine until T11 has no open P0 findings.
 | Phase | Tasks | Priority |
 |---|---|---|
 | 1. Foundation | T01–T11 (incl. T05A) | P0 |
+| 1a. Foundation follow-up | T10A | P1 |
 | 2. Deal engine | T12–T20 | P0 |
 | 3. Core APIs | T21–T27 | P0 |
 | 4. Frontend | T28–T33 | P0 |
@@ -1308,6 +1362,20 @@ Do not begin the deal engine until T11 has no open P0 findings.
 
 **Security reviews:** T11 (auth, RLS, secrets) · T26 (credits, unlock, redaction) · T36 (payments).
 **QA checkpoints:** T09 (RLS) · T15 (pricing) · T27 (pipeline) · T38 (mobile and errors) · T40 (release gates).
+
+### Parked ideas — recorded so they are not lost, and not built (ADR-0018)
+
+Raised and assessed during planning. **None affects the current build.** Each carries a trigger rather than a vague "later".
+
+| Idea | Verdict | Trigger to revisit |
+|---|---|---|
+| **Community-submitted in-store deals** | The right diagnosis of the supply problem, and it reaches clearance stock no paid feed can see. Survives **only** if users share the *promotion*, never the *stock level* — a national price cut is non-rival and costs the reporter nothing, whereas "my store has twenty left" is rival and no rational user posts it. Pay 2–3 credits on **verification**, never on submission; contributor unlocks their own find free. Needs photo, timestamp, reputation and a "wasn't there" report. Converts the product from curator to platform, with the moderation duty that implies. | 50–100 active users **and** a Deal Score demonstrated against real outcomes. Cold start makes it impossible earlier. |
+| **Retailer data feeds** (Pepesto, Actowiz, Apify) | Purchasable today — daily refresh, promotional prices, GTIN included, a few hundred a month, UK and much of Europe — and drops in as a third `IngestionSource` (§10.3) without touching anything downstream. But it is scraping wrapped in an API, so a feed can die with little notice; and volume is not deals — thousands of bad matches arrive with the good ones, increasing review load rather than reducing it. | 60 manually-curated deals proving the matching and the scoring first. **Never before.** |
+| **2% transaction / search fee** | **Rejected structurally.** The purchase never passes through the product, so it cannot be metered; every variant depends on behaviour after the reveal, which is invisible. A volume fee also inverts the incentive the product rests on. | Not applicable. **Do not re-propose.** |
+| **Buying or prepping on the user's behalf** | Rejected. Means holding customer money, owning stock, VAT liability and Seller Central access — a regulated logistics business, not a feature. Prep centres also do not buy; they forward goods already bought, so the flow does not close. | Not in this product. |
+| **Subscription pricing** | Open, not decided. Credits are one-off purchases from a population that churns within months, while monitoring is inherently recurring. Countervailing point before switching: credits **ration deal exposure**, which is the structural flaw forcing subscription lead lists to cap membership at a few dozen. | Real repeat-purchase data from beta. |
+
+---
 
 **Not in this plan, by design:** automated scraping · affiliate feed adapters · SP-API · seller-specific gating checks · portfolio P&L · push notifications · local sourcing maps · AI assistant · fuzzy matching · subscriptions · CSV export · additional marketplace integrations · simultaneous multi-market launch · cross-border/FX arbitrage · native apps · Python services · 3PL workflow. See `PRODUCT_SPEC.md` §8 for the reason and the revisit condition for each.
 
