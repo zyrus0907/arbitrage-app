@@ -539,7 +539,25 @@ nothing. `profiles.credit_balance` is **not** zeroed, because that would break
 AC10.8's invariant `sum(delta) = credit_balance` for exactly the rows §11.4
 requires reconciliation to keep covering.
 
-**What is deliberately unresolved:** the legal retention *duration*. The
+**What is NOT removed, and must not be described as removed (ADR-0019 decision 1,
+T11/F1):** Supabase Auth's audit history. `auth.audit_log_entries` retains
+authentication events — sign-in, token refresh, logout, the deletion itself —
+keyed by the subject UUID and carrying request metadata, and deleting the
+`auth.users` row does not purge them. `pseudonymise_account` neither touches nor
+was designed to touch them.
+
+The guarantee the mechanism actually provides is about `public`: **no row this
+application can reach — through `anon`, `authenticated` or `service_role` — ties
+the UUID back to a person.** `auth` is not in PostgREST's exposed schemas, so the
+audit history has no API surface at all here; it is reachable only by a database
+superuser or through the Supabase dashboard. When answering a user or a
+regulator, say *pseudonymised in the application's data* — not *erased
+everywhere*. **Do not purge `auth.audit_log_entries` to make a sentence true:**
+destroying authentication audit history is its own incident, and the retention
+question belongs to T37.
+
+**What is deliberately unresolved:** the legal retention *duration* — for the
+financial rows **and** for the auth audit history. The
 mechanism retains indefinitely. Settle the period with advice before beta and
 record it in the privacy policy (T37) — do not invent one in a column comment.
 
@@ -557,3 +575,20 @@ npm run build && npm run scan:bundle
 Reads `.next/static` and fails on any server-only variable **name** or **value**,
 or on a `service_role` JWT claim. The source scan in `tests/unit/supabase/` is
 not a substitute: it cannot see what the compiler emitted.
+
+**Three outcomes, not two** (T11 finding F6):
+
+| Result | Exit | Meaning |
+| --- | --- | --- |
+| `PASS` | 0 | Nothing found, **and** the value-level assertion for `SUPABASE_SERVICE_ROLE_KEY` actually ran. |
+| `INCOMPLETE` | 2 | Nothing found, but that assertion was skipped because no value was in the environment. `--allow-incomplete` exits 0 instead; it still never prints `PASS`. |
+| `FAIL` | 1 | Something was found. Rotate the key before anything else (§11.1). |
+
+The value assertion is the only one that can catch a key inlined from a
+*different* environment, so a run without it is not a clean bill of health. It
+does **not** need a real key: export the local stack's published service-role
+key (`npx supabase status`) before the build and the scan. CI does exactly that.
+Never put a production service-role key in CI to satisfy this.
+
+The script prints which value assertions executed and which did not. It never
+prints a value.

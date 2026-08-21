@@ -97,7 +97,12 @@ export async function signUpWithPassword(
     options: { emailRedirectTo: callbackUrl(next) },
   });
 
-  if (error) return { error: error.message };
+  // T11/F9: Supabase's own message is not passed through. It distinguishes
+  // "already registered", "password rejected by policy" and "rate limited", and
+  // the first of those turns this form into the account-enumeration oracle that
+  // `signInWithPassword` above is deliberately built not to be. The client-side
+  // Zod schema has already told the user about anything they can actually fix.
+  if (error) return { error: messages.auth.errors.signUpFailed };
 
   // With email confirmation required (AC1.1), `signUp` returns a user and no
   // session: the account exists, the verification email is on its way, and

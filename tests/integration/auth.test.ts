@@ -549,7 +549,89 @@ describe('the profile', () => {
     expect(response.status).toBe(400);
   });
 
-  it('persists onboarding completion (requirement 14)', async () => {
+  /**
+   * T11 findings F3, F4 and F7, over the wire a browser actually uses: the
+   * anon key, a real JWT, PostgREST directly. Every one of these was reachable
+   * before the profile-integrity migration, and none of them goes anywhere near
+   * `src/services/profile/` — which is the point, because that is the layer the
+   * findings said was carrying the invariants on its own.
+   */
+  it('refuses a forged onboarded_at from a signed-in client (F4)', async () => {
+    const { error } = await clientA
+      .from('profiles')
+      .update({ onboarded_at: new Date().toISOString() })
+      .eq('id', userA.id);
+
+    // 42501: the column-level UPDATE grant, not a policy and not the app.
+    expect(error?.code).toBe('42501');
+
+    const { data } = await service
+      .from('profiles')
+      .select('onboarded_at')
+      .eq('id', userA.id)
+      .single();
+    expect(data?.onboarded_at).toBeNull();
+  });
+
+  it('refuses onboarded_at smuggled alongside a writable column (F4)', async () => {
+    const { error } = await clientA
+      .from('profiles')
+      .update({ display_name: 'Smuggler', onboarded_at: new Date().toISOString() })
+      .eq('id', userA.id);
+    expect(error?.code).toBe('42501');
+  });
+
+  it('refuses a country that contradicts the selected market (F7)', async () => {
+    const { data: market } = await clientA
+      .from('markets')
+      .select('id, currency, source_country_code')
+      .limit(1)
+      .single();
+
+    const { data: elsewhere } = await service
+      .from('countries')
+      .select('code')
+      .neq('code', market!.source_country_code)
+      .limit(1)
+      .single();
+
+    const { error } = await clientA
+      .from('profiles')
+      .update({ country_code: elsewhere!.code, default_market_id: market!.id })
+      .eq('id', userA.id);
+
+    expect(error).not.toBeNull();
+    expect(error?.code).toBe('23514');
+  });
+
+  it('refuses a currency the selected market does not trade in (F7)', async () => {
+    const { data: market } = await clientA
+      .from('markets')
+      .select('id, currency, source_country_code')
+      .limit(1)
+      .single();
+
+    const { data: other } = await service
+      .from('currencies')
+      .select('code')
+      .neq('code', market!.currency)
+      .limit(1)
+      .single();
+
+    const { error } = await clientA
+      .from('profiles')
+      .update({
+        country_code: market!.source_country_code,
+        default_market_id: market!.id,
+        assumption_currency: other!.code,
+        default_budget_minor: 250000,
+      })
+      .eq('id', userA.id);
+
+    expect(error?.code).toBe('23514');
+  });
+
+  it('persists onboarding completion, with onboarded_at derived and not asserted (requirement 14, F3)', async () => {
     const { data: market } = await clientA
       .from('markets')
       .select('id, currency, source_country_code')
@@ -557,6 +639,9 @@ describe('the profile', () => {
       .single();
     expect(market).not.toBeNull();
 
+    // Note the absence of `onboarded_at`: the client never names it. It is
+    // stamped by the database because — and only because — the row now holds
+    // everything AC2.1 collects.
     const { error } = await clientA
       .from('profiles')
       .update({
@@ -566,7 +651,7 @@ describe('the profile', () => {
         default_budget_minor: 250000,
         prep_cost_per_unit_minor: 45,
         inbound_shipping_per_unit_minor: 120,
-        onboarded_at: new Date().toISOString(),
+        tax_registered: false,
       })
       .eq('id', userA.id);
     expect(error).toBeNull();

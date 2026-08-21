@@ -112,6 +112,10 @@ export const messages = {
       invalidInput: 'Check the details and try again.',
       invalidCredentials: 'That email and password did not match an account.',
       linkFailed: 'That link has expired or has already been used. Request a new one.',
+      // T11/F9. Deliberately says nothing about whether the address already has
+      // an account: the signup form must not become the enumeration oracle that
+      // the sign-in form was carefully built not to be.
+      signUpFailed: 'We could not complete that sign-up. Check the details and try again.',
     },
   },
 

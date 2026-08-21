@@ -20,6 +20,21 @@ jobs:
       # environment; no secret is required to verify the repository.
       NEXT_PUBLIC_SITE_URL: http://localhost:3000
 
+      # T11/F6 — NOT A SECRET, and deliberately so.
+      #
+      # This is the local Supabase stack's published development service-role
+      # key: a fixed JWT signed with the published local JWT secret
+      # ("super-secret-jwt-token-with-at-least-32-characters-long"), printed by
+      # `npx supabase status` on every developer's machine. It authenticates
+      # nothing that exists outside a local `supabase start`.
+      #
+      # It is here so that the bundle scan's VALUE-level assertion actually
+      # runs. Without a value in the environment the scan could only check
+      # variable names, and it used to report a clean pass anyway — which is
+      # finding F6. A real production key must never be placed here; it would
+      # buy nothing and would put a live credential in a CI log's blast radius.
+      SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
+
     steps:
       - uses: actions/checkout@v4
 

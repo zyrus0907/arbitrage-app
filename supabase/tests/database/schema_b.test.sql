@@ -1399,6 +1399,9 @@ select is(
                             -- and the guard that replaced profiles_id_fkey.
                             'pseudonymise_account',
                             'enforce_profile_tombstoned_before_auth_delete',
+                            -- T11/F3,F4,F7: the profile integrity triggers.
+                            'profiles_derive_onboarded_at',
+                            'profiles_enforce_market_coherence',
                             '_deal_sql')),
   0,
   'Schema B added exactly one function, the lifecycle trigger function');

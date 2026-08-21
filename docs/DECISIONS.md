@@ -981,7 +981,7 @@ A suite asserting `error.code === '42501'` therefore cannot tell the grant layer
 
 **Context.** ADR-0010 decided that financial records survive account deletion: `credit_ledger.user_id` and `credit_purchases.user_id` are `ON DELETE RESTRICT`. It also decided, explicitly, **not** to choose the de-identification mechanism, because that choice fixes the foreign-key shape, the reconciliation query and the strength of the privacy claim in one stroke, and belongs to the task that must implement and test it. T09 turned the consequence from a prediction into a demonstrated, blocking fact: `auth.admin.deleteUser` fails with `23503` for any user who has ever held a credit, which is every user.
 
-T10 must satisfy three constraints **simultaneously**: the user's personal data is gone; the financial history still sums to the same totals per currency; and no retained row can be traced back to a person through this database.
+T10 must satisfy three constraints **simultaneously**: the user's personal data is gone; the financial history still sums to the same totals per currency; and no retained row can be traced back to a person through this database. **The third constraint as worded here is too broad and is corrected by ADR-0019 decision 1:** it holds for `public`, which is the whole surface this application can reach, and it does not hold for `auth`, whose audit history T10 neither touches nor was designed to touch.
 
 **One fact eliminates half the option space before any preference is expressed.** `credit_ledger` is append-only at two independent layers (ADR-0010 decision 3): a `BEFORE UPDATE OR DELETE` trigger that raises unconditionally, **and** `REVOKE UPDATE, DELETE … FROM service_role`. Therefore:
 
@@ -1087,3 +1087,68 @@ The same argument disposes of the transaction-fee variants explored in the same 
 - **T40 gains a falsifiable pre-launch test:** twenty published deals ranked against a paid arbitrage lead list over the same period. If a $30/month spreadsheet ranks the profitable ones higher, the Deal Score is wrong and beta waits. Better to learn that from a comparison than from a user.
 - **T10A is created, and T10 is not reopened.** The disposable-domain refusal (decision 8) and the prep-cost onboarding defaults become one P1 task, **T10A**, sequenced after T10 closes. On the prep-cost half: Amazon ended FBA prep and labelling in Europe on 1 July 2026, so most sellers now pay a third-party prep centre and most beginners do not know their real per-unit rate. A tappable list of typical rates beats an empty field, and a more accurate prep cost makes every profit figure in the product sharper than a competitor's — for the cost of one onboarding option and no integration. **Neither item is a T10 acceptance criterion, then or now**, and T10A must re-time onboarding against AC2.4 because it adds a step.
 - **T41's scope is unchanged and its framing is not.** The watchlist is "the products I re-buy — are they still worth buying today?", not a bookmark. Monitoring is what people pay for repeatedly, and it is the reason a user opens the app in week six.
+
+---
+
+## ADR-0019 — T11 hardening: the erasure claim is narrowed to `public`, `onboarded_at` becomes a derived column, and the bundle scan stops reporting a pass it did not earn
+
+**Status:** Accepted · **T11 security review #1, hardening pass** · 2026-08-18 · corrects one claim in ADR-0017 · adds `20260817231500_profile_onboarding_integrity.sql` · **closes no task** — T10 remains in verification and T11 remains open (see the scope note below)
+
+> **Scope note, stated first because two adjacent things have already been confused once.**
+>
+> **1. This ADR closes nothing.** T10's two outstanding acceptance criteria — the hosted signup → verification → onboarding → feed → sign-out pass, and the recorded sub-60-second onboarding timing on a mid-range Android (AC2.4) — are still unverified, and nothing here verifies them. T11 itself is not complete: this pass resolved the findings that must not be inherited by the deal engine, and the remainder of T11's own acceptance criteria are unchanged.
+>
+> **2. The migration below is applied to the linked project.** Migration parity is 11/11 and `db diff --linked --schema public` reports no changes. It affected zero hosted rows.
+
+**Context.** The T11 review produced eleven findings. Four of them are properties the deal engine (T12/T13) would otherwise be built on top of: an anonymous production page executing service-role queries, and three profile invariants that existed only in application code. This pass resolves those, plus the smaller reporting and error-handling defects, and corrects one privacy claim that was stated more broadly than the mechanism supports.
+
+**Decision 1 — The erasure claim is narrowed to `public`, and technical pseudonymisation is separated from legal erasure (F1).**
+
+`pseudonymise_account` does what ADR-0017 says it does **within `public`**: personal rows deleted, profile scrubbed to a tombstone, `app_events` actor nulled, ledger retained. It does **not** remove Supabase Auth's own history. `auth.audit_log_entries` retains authentication events — sign-in, token refresh, logout, user deletion — keyed by the subject UUID, with request metadata such as IP address, and deleting the `auth.users` row does not purge them.
+
+Three statements replace the single over-broad one:
+
+1. **What is guaranteed:** no row reachable by this application — through `anon`, `authenticated` or `service_role`, over PostgREST or any client it constructs — reconnects the subject UUID to a person. `auth` is not in PostgREST's exposed schemas, so `auth.audit_log_entries` has no API surface here at all; it is reachable only by a database superuser or through the Supabase dashboard.
+2. **What is not guaranteed:** that the database *as a whole* retains nothing identifying. It does, in `auth`, by design, and that is authentication audit history rather than product data.
+3. **These are different things.** Pseudonymisation is a technical state — the mechanism T10 built and tested. Erasure is a legal conclusion about *all* processing of a person's data, including retention periods and lawful bases. The first does not establish the second.
+
+**The retention and purge policy for auth audit history is unresolved and belongs to T37**, in the same register as ADR-0017 decision 7's financial retention duration. **No period is stated here.** Inventing one would be a legal claim made by an engineer and inherited as fact. `auth.audit_log_entries` was deliberately **not** purged, altered or deleted by this pass: destroying authentication audit history to make a documentation sentence true would be the wrong repair in both directions.
+
+**Decision 2 — `/` is gated on `NODE_ENV`, before the import, not after the query (F2).**
+
+The development dashboard was served to anonymous callers in every environment, and its data layer runs service-role aggregate queries. In production that was an unauthenticated request causing privileged reads on every page load. The gate is `NODE_ENV !== 'production'` and nothing more: no `ENABLE_DEV_DASHBOARD` variable, because an escape hatch is the thing that gets set "temporarily" in production, and because Next inlines `NODE_ENV` at build time so a production build cannot be argued out of it at runtime. **The gate is checked before a dynamic `import()` of the snapshot module**, so in production neither it nor `supabase/admin.ts` is evaluated — gating the JSX instead would have hidden the output while leaving the reads in place, which is the finding rather than a fix for it. The production branch is a two-line holding page; the T28 home/feed UI is unaffected and unbuilt.
+
+**Decision 3 — `onboarded_at` is a DERIVED column, not an input (F3, F4).**
+
+It was in T06's authenticated column-UPDATE allowlist, so a signed-in client could `PATCH` its own row with nothing but a timestamp and be treated as onboarded by `profileStage()` — no country, no market, no currency, no cost basis. It was a stage-bypass switch that happened to be spelled like a timestamp, and the deal engine was about to start trusting it.
+
+It is now stamped by a `BEFORE INSERT OR UPDATE` trigger when — and only when — the row carries every field AC2.1 collects, and cleared the moment it stops carrying them. The stamp is preserved across later unrelated edits. **`revoke update (onboarded_at) … from authenticated`** makes an attempt a `42501` rather than a silently ignored key; the trigger makes a forged value ineffective even for the table owner. Both are wanted, for the same reason T06 kept both a policy and a column grant on `credit_balance`. The tombstone case falls out for free: a scrubbed row is incomplete, so `onboarded_at` is null, which is what `profiles_tombstone_carries_no_personal_data` already demanded.
+
+**Decision 4 — Country, market and currency coherence is a storage-layer invariant (F7).**
+
+Cross-field validation lived only in `src/services/profile/`. A direct PostgREST call, an alternate client or a future API implementation could write GB against the US market, or a GBP budget against a EUR market — and §11.3's rule that a client-supplied currency or market id is never trusted was being kept by one code path rather than by the database. A trigger now refuses, with `23514`, any row whose `country_code` or `assumption_currency` contradicts its `default_market_id`.
+
+**These are triggers rather than CHECK constraints because every one of them is a statement about a `profiles` row relative to a `markets` row**, and a CHECK may not read another table. Both trigger functions are `SECURITY DEFINER`, owned by `postgres`, with `search_path` pinned to `public, pg_temp`, and executable by nobody — not PUBLIC, not `anon`, not `authenticated`, not `service_role`. DEFINER is required, not decorative: `markets` is under an RLS policy narrower than the catalogue (ADR-0013 restricts the public read to active and live), so an INVOKER trigger would fail to see a market that had since been retired and would start rejecting unrelated settings edits by that user.
+
+**The trigger's error messages name no value read from `markets`.** Under DEFINER, echoing the market's country or currency back would turn the trigger into an oracle reporting two columns of any market whose id the caller can name — including markets RLS hides from them. The caller is told which of *their own* fields is wrong, which is all they can act on. Neither function performs DML or dynamic SQL, and neither can be invoked directly: PostgreSQL refuses a trigger function called as an ordinary function.
+
+**Decision 5 — The bundle scan has three outcomes, and reports which checks ran (F6).**
+
+The value-level assertion — the only one that catches a key inlined from a *different* environment — is conditional on a value being present in the scanning process's environment. CI had none, so it never ran, and the script printed a clean pass anyway. The sentence was true and the impression it gave was false.
+
+`PASS` (exit 0) now requires that the `SUPABASE_SERVICE_ROLE_KEY` value assertion actually executed. `INCOMPLETE` (exit 2, or 0 under an explicit `--allow-incomplete`, never printing `PASS`) is the outcome when it did not, including when the value is too short to scan. `FAIL` (exit 1) outranks both. Name and literal scanning are independent of any value and always run, and the script prints per-variable **state**, never a value.
+
+**CI supplies a value, and it is deliberately not a secret.** The local Supabase stack's service-role key is a fixed, published development JWT signed with the published local JWT secret; it authenticates nothing outside a developer's own `supabase start`. It makes the assertion genuinely execute against a real service-role-shaped token with no production credential anywhere near a CI log. **A real key must never be placed there** — it would buy nothing and would put a live credential in the blast radius of every build log.
+
+**Decision 6 — Two error surfaces stop volunteering detail (F8, F9).**
+
+`DELETE /api/v1/account` returned the raw Postgres or GoTrue message — constraint names, function names, sometimes statement fragments — to any signed-in caller. It now logs that server-side and returns the code with a fixed sentence, matching how `PATCH /api/v1/profile` already handled its `io` case. Signup no longer passes through Supabase's own message, which distinguishes "already registered" from a policy rejection and made the form the account-enumeration oracle that `signInWithPassword` was carefully built not to be.
+
+**Consequences.**
+
+- **`profiles.onboarded_at` is server-owned.** `applyOnboarding` no longer writes it; "onboarded" is now a fact about the row rather than a claim by whichever client wrote it. **T12 and T13 may rely on `profileStage() == 'ready'` implying a resolved market, a resolved currency and a complete cost basis** — which is the whole reason this was worth doing before the deal engine rather than after.
+- **The authenticated column-UPDATE allowlist on `profiles` is thirteen columns, not fourteen.** `security_baseline.test.sql`, `schema_b`, `schema_c` and `account_deletion` pgTAP allowlists were updated to match, and the SECURITY DEFINER inventory is now seven functions.
+- **Applied remotely with zero row impact:** one hosted profile, coherent, `onboarded_at` retained; zero rows rejected, rewritten or cleared.
+- **A false alarm is recorded so it is not re-raised.** `credit_ledger_idempotent_match` appears in the hosted PostgREST OpenAPI document and not in the local one, which looked like remote ACL drift. It is not: both sides have identical signature, owner, INVOKER status, `search_path` and `proacl`, and both refuse execution with `42501`. **A PostgREST listing is not a privilege oracle** — check `proacl` and the live call, not the OpenAPI document.
+- **T37 inherits decision 1.** The privacy policy must distinguish what is pseudonymised from what is retained in authentication audit history, and must state a retention period settled by a human.
+- **T39 is untouched.** Security headers were out of scope and nothing here needed them.

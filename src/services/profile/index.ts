@@ -219,7 +219,11 @@ export async function applyOnboarding(
     assumption_currency: market.currency,
     locale: input.locale ?? market.countryLocale,
     timezone: input.timezone ?? market.countryTimezone,
-    onboarded_at: new Date().toISOString(),
+    // `onboarded_at` is deliberately NOT written here (T11/F3,F4). It is derived
+    // by `profiles_derive_onboarded_at` from the row this update produces, and
+    // `authenticated` no longer holds the column-UPDATE grant — sending it would
+    // be a 42501. "Onboarded" is now a fact about the row rather than a claim
+    // made by whichever client happened to write it.
   };
 
   if (input.display_name !== undefined) update.display_name = input.display_name;

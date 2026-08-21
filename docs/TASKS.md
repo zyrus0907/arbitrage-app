@@ -4,7 +4,7 @@
 **Document owner:** Technical Project Manager
 **Version:** 2.5 — global-first, marketplace-agnostic, Amazon-first MVP
 **Source documents:** `ARCHITECTURE.md` v2.0 (technical contract) · `PRODUCT_SPEC.md` v2.0 (scope contract)
-**Status:** In execution. **T01–T09 complete. T10 is implemented and deployed but NOT closed** — two acceptance criteria remain unverified (see T10). **T11 does not start until both pass.** ADR-0017 records how T10 solved account deletion; it is not evidence that T10's acceptance criteria were verified.
+**Status:** In execution. **T01–T09 complete. T10 is implemented and deployed but NOT closed** — two acceptance criteria remain unverified (see T10). **T11 does not start until both pass.** ADR-0017 records how T10 solved account deletion; it is not evidence that T10's acceptance criteria were verified. **T11's review has produced findings and a hardening pass has landed (ADR-0019); T11 is not complete and T10 is not closed by it.**
 
 > **Execution scope:** Build a global-first core, but operate exactly one launch market during MVP. Amazon is the only marketplace integration in MVP. Country, currency, tax regime and marketplace must be data/configuration concepts, not hard-coded application assumptions.
 
@@ -595,6 +595,14 @@ T05 planning decisions, taken before T05 begins and recorded as **ADR-0010**. **
   - Produces a written findings list; **P0 findings block T12 onward**.
 - **Testing requirements:** Reviewer re-runs T09 and T07's concurrency test independently and records the results.
 - **Priority:** P0
+- **Status: IN PROGRESS — findings produced, hardening pass landed, NOT COMPLETE.** The review produced eleven findings (F1–F11). A hardening pass on 2026-08-18 resolved the subset that must not be inherited by the deal engine; **ADR-0019** records it in full. **T11 does not close on this**: its acceptance criteria above are verification statements a reviewer must make, several are unmade, and T10 remains in verification, which T11's dependency line requires to have passed.
+  - **F2 (dev dashboard served service-role queries to anonymous production callers) — RESOLVED.** `NODE_ENV` gate checked before a dynamic import; production never evaluates the admin snapshot layer. Proven by `tests/unit/dev-dashboard/production-gate.test.ts`.
+  - **F3, F4, F7 (profile/onboarding integrity) — RESOLVED IN THE DATABASE**, migration `20260817231500_profile_onboarding_integrity.sql`, applied to the linked project with zero row impact. `onboarded_at` is derived and no longer in the authenticated column-UPDATE allowlist; country/market/currency coherence is a trigger, not application code. **T12/T13 may now rely on `profileStage() == 'ready'` implying a resolved market, currency and cost basis.**
+  - **F6 (bundle scan reported a pass it had not earned) — RESOLVED.** Three-valued result; CI supplies the published local-stack key so the value assertion genuinely runs.
+  - **F8, F9, F11 — RESOLVED** (no raw Postgres errors to users; no signup enumeration detail; explicit secure-cookie regression coverage).
+  - **F1 (auth audit residue) — DOCUMENTATION CORRECTED, NO DATA TOUCHED.** `auth.audit_log_entries` was deliberately not purged or altered. The over-broad erasure claim is narrowed to `public` in ADR-0017/ADR-0019, `ARCHITECTURE.md` §11.5 and `RUNBOOK.md` §11.4. **Retention/purge policy is unresolved and belongs to T37; no period is stated anywhere.**
+  - **Still open, and required before T11 can close:** F5 and F10 remain unaddressed by this pass, and every acceptance criterion above still needs an explicit reviewer verification recorded against it.
+- **Out of scope, deliberately:** T39 security headers, and any narrowing of T26-owned `service_role` DML.
 
 ---
 
@@ -1344,7 +1352,7 @@ Currencies, countries, Amazon locales, exactly one live market with verified tax
 *Why fifth:* it is the first task that proves the global-first claim, and it cannot run before T05A without risking committing the exact overlap the constraint exists to prevent.
 
 **Next up:** ✅ T09 (RLS/privilege QA) — **COMPLETE, PASS WITH FINDINGS**, two P1s fixed (database tests absent from CI; `stripe_webhook_events` TRUNCATE guard) → **T10 (auth/onboarding — implemented and deployed, account deletion resolved by ADR-0017, but IN VERIFICATION and not closed: hosted E2E and the AC2.4 Android timing are both outstanding)** → T11 (security review, gated on T10 closing). T10A is a P1 follow-up after T10 closes and gates nothing.  
-Do not begin the deal engine until T11 has no open P0 findings.
+Do not begin the deal engine until T11 has no open P0 findings. **T11's 2026-08-18 hardening pass (ADR-0019) resolved F2, F3, F4, F6, F7, F8, F9 and F11 and corrected F1's documentation; F5 and F10 are still open and T11's own acceptance criteria are still unverified, so T12 does not start.**
 ---
 
 ## Appendix — Task index

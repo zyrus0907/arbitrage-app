@@ -31,6 +31,33 @@
  * It never prints a secret. A hit is reported by variable name, file and
  * offset; the matched text is not echoed, because the output of this script is
  * exactly the sort of thing that ends up in a CI log.
+ *
+ * WHY IT REPORTS WHETHER (2) ACTUALLY RAN — T11 finding F6
+ *
+ * The value-level assertion is conditional on the value being present in the
+ * scanning process's environment. In CI, which held no `SUPABASE_SERVICE_ROLE_KEY`,
+ * it never ran — and the script still printed "No server-only variable name,
+ * value or service-role claim appears in it." That sentence was true and the
+ * impression it gave was false: the only check that can catch a key inlined
+ * from a *different* environment had been silently skipped, in exactly the
+ * environment the badge was being read from.
+ *
+ * So the outcome is now three-valued and the summary names which value
+ * assertions executed:
+ *
+ *   PASS       — nothing found, and the required value assertion ran.
+ *   INCOMPLETE — nothing found, but the required secret was absent. Exit 2 by
+ *                default; exit 0 only with an explicit `--allow-incomplete`,
+ *                and the word PASS is never printed either way.
+ *   FAIL       — something was found. Exit 1.
+ *
+ * CI SUPPLIES A VALUE, AND IT IS NOT A SECRET. The local Supabase stack's
+ * service-role key is a fixed, published development key signed with the
+ * published local JWT secret — it authenticates nothing outside a developer's
+ * own `supabase start`. Setting it for the build makes the value assertion
+ * genuinely execute against a real, service-role-shaped JWT without putting a
+ * production credential anywhere near a CI log. A real key is never required
+ * here and must never be added.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -95,6 +122,27 @@ if (files.length === 0) {
 
 const findings = [];
 
+/**
+ * The value assertion is only meaningful for a value long enough not to collide
+ * with minified output, so "set" is not the same question as "usable". Both are
+ * tracked, and reported, per variable.
+ */
+const MIN_SCANNABLE_VALUE_LENGTH = 20;
+
+/** Without this one, the scan cannot answer the question it exists to answer. */
+const VALUE_ASSERTION_REQUIRED_FOR = 'SUPABASE_SERVICE_ROLE_KEY';
+
+const allowIncomplete = process.argv.includes('--allow-incomplete');
+
+const valueAssertions = new Map(
+  SERVER_ONLY_VARS.map((name) => {
+    const value = process.env[name];
+    if (!value) return [name, 'not set'];
+    if (value.length < MIN_SCANNABLE_VALUE_LENGTH) return [name, 'too short to scan'];
+    return [name, 'executed'];
+  }),
+);
+
 for (const file of files) {
   let content;
   try {
@@ -112,7 +160,7 @@ for (const file of files) {
     const value = process.env[name];
     // A short value would produce false positives against minified output; a
     // real key is far longer than this.
-    if (value && value.length >= 20 && content.includes(value)) {
+    if (valueAssertions.get(name) === 'executed' && content.includes(value)) {
       findings.push({
         what: `the VALUE of ${name}`,
         file: relative(repoRoot, file),
@@ -131,8 +179,17 @@ for (const file of files) {
 
 console.log(`Scanned ${files.length} client bundle files under .next/static.`);
 
+console.log('\nChecks performed:');
+console.log(`  variable NAMES        executed for all ${SERVER_ONLY_VARS.length} server-only variables`);
+console.log(`  forbidden LITERALS    executed for all ${FORBIDDEN_LITERALS.length} literals`);
+console.log('  variable VALUES:');
+for (const [name, state] of valueAssertions) {
+  // The state, never the value.
+  console.log(`    ${name.padEnd(30)} ${state}`);
+}
+
 if (findings.length > 0) {
-  console.error('\nSECRET MATERIAL FOUND IN THE CLIENT BUNDLE:\n');
+  console.error('\nRESULT: FAIL — SECRET MATERIAL FOUND IN THE CLIENT BUNDLE:\n');
   for (const finding of findings) {
     console.error(`  ${finding.what}\n    in ${finding.file} at offset ${finding.at}`);
   }
@@ -143,4 +200,19 @@ if (findings.length > 0) {
   process.exit(1);
 }
 
-console.log('No server-only variable name, value or service-role claim appears in it.');
+if (valueAssertions.get(VALUE_ASSERTION_REQUIRED_FOR) !== 'executed') {
+  // Not a pass. The name scan and the literal scan found nothing, and the one
+  // check that would catch a key inlined from another environment did not run.
+  console.error(
+    `\nRESULT: INCOMPLETE — no name, and no forbidden literal, appears in the bundle, but the ` +
+      `value-level assertion for ${VALUE_ASSERTION_REQUIRED_FOR} did not run ` +
+      `(${valueAssertions.get(VALUE_ASSERTION_REQUIRED_FOR)}).\n\n` +
+      'Set it for the build and the scan and re-run. It does NOT have to be a real key: the ' +
+      'local Supabase stack publishes a fixed service-role key (`npx supabase status`) which ' +
+      'authenticates nothing outside your own machine and exercises this assertion fully. ' +
+      'Never put a production service-role key in a CI environment to satisfy this.',
+  );
+  process.exit(allowIncomplete ? 0 : 2);
+}
+
+console.log('\nRESULT: PASS — no server-only variable name, value or service-role claim appears in it.');

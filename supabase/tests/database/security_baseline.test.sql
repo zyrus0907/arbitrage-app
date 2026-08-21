@@ -129,7 +129,7 @@ select is(
 -- B. The complete column-privilege matrix
 -- ===========================================================================
 --
--- The only column-level grants in the schema are the fourteen that make
+-- The only column-level grants in the schema are the thirteen that make
 -- `profiles` updatable without making `credit_balance` updatable. A future
 -- column added to `profiles` is NOT granted by default, which is the safe
 -- direction; a future column added to this list has to appear here first.
@@ -152,13 +152,12 @@ authenticated profiles default_market_id UPDATE
 authenticated profiles display_name UPDATE
 authenticated profiles inbound_shipping_per_unit_minor UPDATE
 authenticated profiles locale UPDATE
-authenticated profiles onboarded_at UPDATE
 authenticated profiles prep_cost_per_unit_minor UPDATE
 authenticated profiles tax_registered UPDATE
 authenticated profiles tax_registration_country UPDATE
 authenticated profiles tax_scheme UPDATE
 authenticated profiles timezone UPDATE',
-  'the only column-level grants are the fourteen writable profile columns');
+  'the only column-level grants are the thirteen writable profile columns');
 
 -- Named directly, because this is the one that matters most: the cached balance
 -- is moved only by the T07 RPCs, and a write privilege here would be a way
@@ -300,6 +299,8 @@ enforce_webhook_event_restricted_update secdef=f cfg=search_path=pg_catalog, pg_
 enforce_webhook_events_no_truncate secdef=f cfg=search_path=pg_catalog, pg_temp acl={postgres=X/postgres}
 grant_credits secdef=t cfg=search_path=public, pg_temp acl={postgres=X/postgres,service_role=X/postgres}
 handle_new_user secdef=t cfg=search_path=public, pg_temp acl={postgres=X/postgres}
+profiles_derive_onboarded_at secdef=t cfg=search_path=public, pg_temp acl={postgres=X/postgres}
+profiles_enforce_market_coherence secdef=t cfg=search_path=public, pg_temp acl={postgres=X/postgres}
 pseudonymise_account secdef=t cfg=search_path=public, pg_temp acl={postgres=X/postgres,service_role=X/postgres}
 set_updated_at secdef=f cfg=search_path=pg_catalog, pg_temp acl={postgres=X/postgres}
 spend_credits secdef=t cfg=search_path=public, pg_temp acl={postgres=X/postgres,service_role=X/postgres}',
@@ -325,7 +326,14 @@ select is(
   (select string_agg(p.proname, ',' order by p.proname)
      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public' and p.prosecdef),
-  'enforce_profile_tombstoned_before_auth_delete,grant_credits,handle_new_user,pseudonymise_account,spend_credits',
+  'enforce_profile_tombstoned_before_auth_delete,grant_credits,handle_new_user,profiles_derive_onboarded_at,profiles_enforce_market_coherence,pseudonymise_account,spend_credits',
+  -- T11/F3,F4,F7 adds the two `profiles_*` triggers. Both must run as owner:
+  -- the coherence trigger reads `public.markets`, which is under an RLS policy
+  -- narrower than the catalogue (ADR-0013), and the derivation trigger owns a
+  -- column the calling role is no longer granted. Neither is executable by any
+  -- role — a trigger function's EXECUTE privilege is checked when the trigger is
+  -- created, not when it fires.
+  --
   -- T10/ADR-0017 adds two. `pseudonymise_account` must run as owner to write the
   -- tombstone and delete the personal rows, and is granted EXECUTE to
   -- service_role alone — the same posture as the two credit RPCs. The delete
@@ -333,7 +341,7 @@ select is(
   -- calling role is `supabase_auth_admin`, which holds no privilege on
   -- `public.profiles`. It is executable by nobody, reads one column, writes
   -- nothing, and either returns OLD or raises.
-  'exactly five SECURITY DEFINER functions exist, and they are the known five');
+  'exactly seven SECURITY DEFINER functions exist, and they are the known seven');
 
 -- pg_temp must be LAST. A definer function whose search_path resolved pg_temp
 -- first could be pointed at a temporary table created by the caller.

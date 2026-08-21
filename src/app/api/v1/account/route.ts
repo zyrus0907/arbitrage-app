@@ -37,8 +37,24 @@ export async function DELETE() {
   const result = await deleteAccount(createAdminClient(), context.user.id);
 
   if (!result.ok) {
+    // T11/F8. The service's error carries the raw Postgres or GoTrue message —
+    // constraint names, function names, column names, sometimes a fragment of
+    // the statement. That is reconnaissance handed to whoever asked, and this
+    // endpoint is reachable by any signed-in user. The operator needs it, so it
+    // is logged; the caller gets the code and a fixed sentence, matching how
+    // `PATCH /api/v1/profile` already handles its `io` case.
+    console.error('[account.delete] failed', {
+      userId: context.user.id,
+      code: result.error.code,
+      message: result.error.message,
+    });
+
     return NextResponse.json(
-      { ok: false, error: result.error, meta: { version: 'v1' } },
+      {
+        ok: false,
+        error: { code: result.error.code, message: 'Could not delete the account' },
+        meta: { version: 'v1' },
+      },
       { status: 500 },
     );
   }
